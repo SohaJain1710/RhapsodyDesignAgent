@@ -1,0 +1,71 @@
+{
+  "name": "rhapsody-design-assistant",
+  "displayName": "Rhapsody Model Assistant",
+  "description": "Generate Detailed Design artifacts from requirements, via GitHub Copilot",
+  "version": "0.0.2",
+  "publisher": "Bosch Global Software Technologies",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI"
+  ],
+  "activationEvents": [
+    "*"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "rhapsody.design.source",
+        "title": "Rhapsody: Select Requirement Source"
+      },
+      {
+        "command": "rhapsody.design.apply",
+        "title": "Rhapsody: Apply Design Changes"
+      },
+      {
+        "command": "rhapsody.design.feedback",
+        "title": "Rhapsody: Provide Design Feedback"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "rhapsody.ddgen",
+        "name": "rhapsody",
+        "description": "Generate Detailed Design from requirements",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "design",
+            "description": "Generate design diagrams from requirements"
+          },
+          {
+            "name": "design_resume",
+            "description": "Resume a paused design run"
+          },
+          {
+            "name": "help",
+            "description": "Show available commands"
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "test": "echo no test"
+  },
+  "author": "",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://example.com/rhapsody-sd-generator"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "vsce": "^2.15.0"
+  },
+  "dependencies": {
+    "express": "^4.22.2"
+  }
+}
