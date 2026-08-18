@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.log
+_debug_*.json
+_debug_*.log
+_design_output_*.json
+_progress_*.json
+llm_request.json
+llm_response.json
+llm_error.json
+node_modules/
+*.vsix
