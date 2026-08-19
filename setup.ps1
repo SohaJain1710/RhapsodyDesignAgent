@@ -1,112 +1,125 @@
-# RhapsodyAIAgent Setup Script
-# Run this once to install everything
-# Usage: Right-click setup.ps1 → Run with PowerShell
+# RhapsodyAIAgent Setup
+$ROOT = $PSScriptRoot
+Write-Host "RhapsodyAIAgent Setup" -ForegroundColor Cyan
+Write-Host "Root: $ROOT"
+Write-Host ""
 
-$ErrorActionPreference = "Stop"
-$ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path
-
-Write-Host "═══════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  RhapsodyAIAgent — One-Click Setup" -ForegroundColor Cyan
-Write-Host "═══════════════════════════════════════════════" -ForegroundColor Cyan
-
-# ── 1. Check Python ──────────────────────────────────────────────────────────
-Write-Host "`n[1/5] Checking Python..." -ForegroundColor Yellow
-try {
-    $pyver = python --version 2>&1
-    Write-Host "  ✅ $pyver" -ForegroundColor Green
-} catch {
-    Write-Host "  ❌ Python not found. Install from https://python.org" -ForegroundColor Red
-    exit 1
+# Step 1: Python
+Write-Host "[1/5] Checking Python..." -ForegroundColor Yellow
+$PYTHON = $null
+foreach ($cmd in "python3","python") {
+    try {
+        $ver = & $cmd --version 2>&1
+        if ($LASTEXITCODE -eq 0) { $PYTHON = $cmd; Write-Host "  OK: $ver"; break }
+    } catch {}
+}
+if (-not $PYTHON) {
+    Write-Host "  ERROR: Python not found. Install Python 3.11 from https://python.org" -ForegroundColor Red
+    Read-Host "Press Enter to exit"; exit 1
 }
 
-# ── 2. Check Node.js ─────────────────────────────────────────────────────────
-Write-Host "`n[2/5] Checking Node.js..." -ForegroundColor Yellow
-try {
-    $nodever = node --version 2>&1
-    Write-Host "  ✅ Node.js $nodever" -ForegroundColor Green
-} catch {
-    Write-Host "  ❌ Node.js not found. Install from https://nodejs.org" -ForegroundColor Red
-    exit 1
+# Step 2: Virtual environment
+Write-Host ""
+Write-Host "[2/5] Setting up Python environment..." -ForegroundColor Yellow
+$VENV = Join-Path $ROOT ".venv"
+$PIP = Join-Path $VENV "Scripts\pip.exe"
+$PY = Join-Path $VENV "Scripts\python.exe"
+$USING_VENV = $false
+
+if (-not (Test-Path $VENV)) {
+    & $PYTHON -m venv $VENV 2>&1 | Out-Null
 }
 
-# ── 3. Python virtual environment ────────────────────────────────────────────
-Write-Host "`n[3/5] Setting up Python virtual environment..." -ForegroundColor Yellow
-$venv = Join-Path $ROOT ".venv"
-if (-not (Test-Path $venv)) {
-    python -m venv $venv
-    Write-Host "  ✅ Created .venv" -ForegroundColor Green
+if (Test-Path $PY) {
+    $USING_VENV = $true
+    Write-Host "  OK: Using virtual environment"
 } else {
-    Write-Host "  ✅ .venv already exists" -ForegroundColor Green
+    Write-Host "  WARNING: venv not available, using system Python" -ForegroundColor DarkYellow
+    $PY = (Get-Command $PYTHON -ErrorAction SilentlyContinue).Source
+    if (-not $PY) { $PY = $PYTHON }
+    $PIP = "$PYTHON -m pip"
 }
 
-$pip = Join-Path $venv "Scripts\pip.exe"
-$python = Join-Path $venv "Scripts\python.exe"
-
-Write-Host "  Installing Python packages..." -ForegroundColor Yellow
-& $pip install -r (Join-Path $ROOT "requirements.txt") --quiet
+Write-Host "  Installing packages (may take 1-2 minutes)..."
+$REQ = Join-Path $ROOT "requirements.txt"
+if ($USING_VENV) {
+    & $PIP install -r $REQ --quiet
+} else {
+    & $PYTHON -m pip install -r $REQ --user --quiet
+}
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "  ❌ pip install failed" -ForegroundColor Red
-    exit 1
+    Write-Host "  ERROR: pip install failed" -ForegroundColor Red
+    Read-Host "Press Enter to exit"; exit 1
+}
+Write-Host "  OK: Packages installed"
+
+$POSTINSTALL = Join-Path $VENV "Scripts\pywin32_postinstall.py"
+if (Test-Path $POSTINSTALL) {
+    & $PY $POSTINSTALL 2>&1 | Out-Null
+    Write-Host "  OK: pywin32 configured"
 }
 
-# Install pywin32 post-install (required for COM)
-Write-Host "  Running pywin32 post-install..." -ForegroundColor Yellow
-& $python (Join-Path $venv "Scripts\pywin32_postinstall.py") -install 2>&1 | Out-Null
-Write-Host "  ✅ Python packages installed" -ForegroundColor Green
+# Step 3: VS Code extension
+Write-Host ""
+Write-Host "[3/5] Installing VS Code extension..." -ForegroundColor Yellow
+$EXT = Join-Path $env:USERPROFILE ".vscode\extensions\oss.rhapsody-dd-Assist-0.0.2"
+$EXTSRC = Join-Path $EXT "src"
+New-Item -ItemType Directory -Path $EXTSRC -Force | Out-Null
 
-# ── 4. VS Code extension ─────────────────────────────────────────────────────
-Write-Host "`n[4/5] Installing VS Code extension..." -ForegroundColor Yellow
+$SRC = Join-Path $ROOT "src"
+Copy-Item (Join-Path $SRC "extension.js") (Join-Path $EXTSRC "extension.js") -Force
+Copy-Item (Join-Path $SRC "package.json") (Join-Path $EXT "package.json") -Force
+Write-Host "  OK: Extension files copied"
 
-# Find VS Code extensions directory
-$extBase = Join-Path $env:USERPROFILE ".vscode\extensions"
-$extDir  = Join-Path $extBase "oss.rhapsody-dd-Assist-0.0.2"
+# node_modules
+$ZIP = Join-Path $SRC "node_modules.zip"
+$FOLDER = Join-Path $SRC "node_modules"
+$DEST = Join-Path $EXT "node_modules"
 
-if (-not (Test-Path $extDir)) {
-    New-Item -ItemType Directory -Path $extDir -Force | Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $extDir "src") -Force | Out-Null
+if (Test-Path $ZIP) {
+    Write-Host "  Extracting node_modules.zip..."
+    Expand-Archive -Path $ZIP -DestinationPath $EXT -Force
+    Write-Host "  OK: node_modules extracted"
+} elseif (Test-Path $FOLDER) {
+    Write-Host "  Copying node_modules..."
+    Copy-Item $FOLDER $DEST -Recurse -Force
+    Write-Host "  OK: node_modules copied"
+} else {
+    Write-Host "  WARNING: No node_modules found. npm install may be needed." -ForegroundColor DarkYellow
 }
 
-# Copy extension files
-$srcDir = Join-Path $ROOT "src"
-Copy-Item (Join-Path $srcDir "extension.js") (Join-Path $extDir "src\extension.js") -Force
-Copy-Item (Join-Path $srcDir "package.json") (Join-Path $extDir "package.json") -Force
-
-# Install npm dependencies
-Write-Host "  Installing npm packages..." -ForegroundColor Yellow
-Push-Location $extDir
-npm install express@4 --save --quiet 2>&1 | Out-Null
-Pop-Location
-Write-Host "  ✅ VS Code extension installed" -ForegroundColor Green
-
-# ── 5. Runtime directory ─────────────────────────────────────────────────────
-Write-Host "`n[5/5] Creating runtime directory..." -ForegroundColor Yellow
-$runtime = "C:\RhapsodyAIAgent_runtime"
-if (-not (Test-Path $runtime)) {
-    New-Item -ItemType Directory -Path $runtime -Force | Out-Null
+# Step 4: Runtime directory
+Write-Host ""
+Write-Host "[4/5] Creating runtime directory..." -ForegroundColor Yellow
+$RUNTIME = "C:\RhapsodyAIAgent_runtime"
+if (-not (Test-Path $RUNTIME)) {
+    New-Item -ItemType Directory -Path $RUNTIME -Force | Out-Null
 }
-Write-Host "  ✅ Runtime dir: $runtime" -ForegroundColor Green
+Write-Host "  OK: $RUNTIME"
 
-# ── Write config file ─────────────────────────────────────────────────────────
-$config = @{
-    tools_path  = Join-Path $ROOT "tools"
-    python_path = $python
-    runtime_dir = $runtime
-} | ConvertTo-Json
+# Step 5: Config
+Write-Host ""
+Write-Host "[5/5] Writing config..." -ForegroundColor Yellow
+$TOOLS = (Join-Path $ROOT "tools") -replace "\\","\\\\"
+$PYESC = $PY -replace "\\","\\\\"
+$RESC  = $RUNTIME -replace "\\","\\\\"
+"{`"tools_path`":`"$TOOLS`",`"python_path`":`"$PYESC`",`"runtime_dir`":`"$RESC`"}" | Set-Content (Join-Path $ROOT "config.json") -Encoding UTF8
+Write-Host "  OK: config.json written"
 
-$config | Set-Content (Join-Path $ROOT "config.json")
+$EXTJS = Join-Path $EXTSRC "extension.js"
+$JS = Get-Content $EXTJS -Raw
+$PYESC2 = $PY -replace "\\","\\\\"
+$JS = $JS -replace "const PYTHON = [^;`r`n]+;","const PYTHON = '$PYESC2';"
+Set-Content $EXTJS $JS -Encoding UTF8
+Write-Host "  OK: extension.js patched"
 
-# Update extension.js to point to correct paths
-$extJs = Join-Path $extDir "src\extension.js"
-$content = Get-Content $extJs -Raw
-$content = $content -replace "const ROOT_DIR = .*", "const ROOT_DIR = '$($ROOT -replace '\\','\\\\')'; // auto-configured"
-$content = $content -replace "const PYTHON = .*", "const PYTHON = '$($python -replace '\\','\\\\')'; // auto-configured"
-Set-Content $extJs $content
-
-Write-Host "`n═══════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  ✅ Setup Complete!" -ForegroundColor Green
-Write-Host "═══════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "`nNext steps:" -ForegroundColor White
-Write-Host "  1. Reload VS Code window (Ctrl+Shift+P → Developer: Reload Window)"
-Write-Host "  2. Open Rhapsody with your project"
-Write-Host "  3. In VS Code chat: @rhapsody /design <ComponentName>"
-Write-Host "`nSee INSTALLATION.md for details."
+Write-Host ""
+Write-Host "Setup Complete!" -ForegroundColor Green
+Write-Host ""
+Write-Host "Next steps:"
+Write-Host "  1. Open VS Code"
+Write-Host "  2. Ctrl+Shift+P -> Developer: Reload Window"
+Write-Host "  3. Open Rhapsody with your project"
+Write-Host "  4. In VS Code chat: @rhapsody /design <ComponentName>"
+Write-Host ""
+Read-Host "Press Enter to close"
