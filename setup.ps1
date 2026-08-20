@@ -7,14 +7,67 @@ Write-Host ""
 # Step 1: Python
 Write-Host "[1/5] Checking Python..." -ForegroundColor Yellow
 $PYTHON = $null
+
+# Try PATH first
 foreach ($cmd in "python3","python") {
     try {
         $ver = & $cmd --version 2>&1
-        if ($LASTEXITCODE -eq 0) { $PYTHON = $cmd; Write-Host "  OK: $ver"; break }
+        if ($LASTEXITCODE -eq 0) { $PYTHON = $cmd; Write-Host "  OK: $ver (from PATH)"; break }
     } catch {}
 }
+
+# Fallback: search C:	toolbase\python for latest version
 if (-not $PYTHON) {
-    Write-Host "  ERROR: Python not found. Install Python 3.11 from https://python.org" -ForegroundColor Red
+    $toolbase = "C:	toolbase\python"
+    if (Test-Path $toolbase) {
+        Write-Host "  Searching $toolbase..." -ForegroundColor Gray
+        # Sort version folders (3.x.x.x) descending to get latest first
+        $pyExes = Get-ChildItem $toolbase -Recurse -Filter "python.exe" -ErrorAction SilentlyContinue |
+                  Where-Object { $_.FullName -notmatch "Scripts|Lib|lib" } |
+                  Sort-Object {
+                      # Extract version numbers from path for proper sorting
+                      if ($_.DirectoryName -match "(\d+)\.(\d+)\.(\d+)") {
+                          [int]$Matches[1] * 10000 + [int]$Matches[2] * 100 + [int]$Matches[3]
+                      } else { 0 }
+                  } -Descending
+        foreach ($pyExe in $pyExes) {
+            $ver = & $pyExe.FullName --version 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $PYTHON = $pyExe.FullName
+                Write-Host "  OK: $ver (found at $($pyExe.FullName))"
+                break
+            }
+        }
+    }
+}
+
+# Fallback: search common corporate locations
+if (-not $PYTHON) {
+    $searchPaths = @(
+        "C:\Python311\python.exe",
+        "C:\Python310\python.exe",
+        "C:\Python39\python.exe",
+        "C:\Program Files\Python311\python.exe",
+        "C:\Program Files\Python310\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe"
+    )
+    foreach ($p in $searchPaths) {
+        if (Test-Path $p) {
+            $ver = & $p --version 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $PYTHON = $p
+                Write-Host "  OK: $ver (found at $p)"
+                break
+            }
+        }
+    }
+}
+
+if (-not $PYTHON) {
+    Write-Host "  ERROR: Python not found." -ForegroundColor Red
+    Write-Host "  Searched: PATH, C:	oolbase\python, C:\Python3xx, AppData" -ForegroundColor Red
+    Write-Host "  Please install Python 3.11 from https://python.org" -ForegroundColor Red
     Read-Host "Press Enter to exit"; exit 1
 }
 
