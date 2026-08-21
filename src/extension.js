@@ -7,11 +7,25 @@ const fs = require('fs');
 const express = require('express');
 
 // ── Paths ────────────────────────────────────────────────────────────────
-const ROOT_DIR = 'C:\\Users\\jio2kor\\OneDrive - Bosch Group\\RhapsodyAIAgent';
+// ROOT_DIR auto-configured by setup.ps1 — fallback uses extension location
+const ROOT_DIR = (() => {
+    const p = require('path');
+    // config.json written by setup.ps1 contains the actual path
+    const cfgFile = p.join(__dirname, '..', 'config.json');
+    try {
+        return JSON.parse(require('fs').readFileSync(cfgFile, 'utf8')).tools_path
+               ? p.dirname(JSON.parse(require('fs').readFileSync(cfgFile, 'utf8')).tools_path)
+               : p.join(__dirname, '..');
+    } catch { return p.join(__dirname, '..'); }
+})();
 const PYTHON = path.join(ROOT_DIR, '.venv', 'Scripts', 'python.exe');
 // Write-heavy runtime files live OUTSIDE OneDrive to avoid sync-lock conflicts
 // with actively-written files (SQLite, temp JSON).
-const RUNTIME_DIR = 'C:\\RhapsodyAIAgent_runtime';
+const RUNTIME_DIR = (() => {
+    const cfgFile = require('path').join(__dirname, '..', 'config.json');
+    try { return JSON.parse(require('fs').readFileSync(cfgFile, 'utf8')).runtime_dir || 'C:\\RhapsodyAIAgent_runtime'; }
+    catch { return 'C:\\RhapsodyAIAgent_runtime'; }
+})();
 if (!fs.existsSync(RUNTIME_DIR)) { fs.mkdirSync(RUNTIME_DIR, { recursive: true }); }
 
 const UNIFIED_GRAPH = path.join(ROOT_DIR, 'tools', 'design_graph_unified.py');
