@@ -467,7 +467,7 @@ def create_ibd(plan, rhapsody=None):
     if new_ports or new_links:
         import os, json as _json
         sidecar_path = os.path.join(
-            r"C:\RhapsodyAIAgent_runtime",
+            RUNTIME_DIR,
             f"{component_name}_pending_changes.json")
         sidecar = {"ibd_ports": new_ports, "ibd_links": new_links,
                    "bdd_classes": [], "bdd_diagrams": []}
