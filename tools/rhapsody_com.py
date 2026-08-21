@@ -1,4 +1,4 @@
-﻿"""
+"""
 Shared Rhapsody COM helpers — used by all tools.
 """
 import win32com.client
