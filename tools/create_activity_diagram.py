@@ -725,7 +725,7 @@ if __name__ == "__main__":
 
 # ── High-level helper: create or update Analysis AD from Mermaid ───────────────
 def create_or_update_ad(component_name: str, usecase: str,
-                         mermaid: str, rhapsody=None) -> dict:
+                         mermaid: str, rhapsody=None, req_map: dict = None) -> dict:
     """
     Update (or create) the Analysis Activity Diagram for a use case
     from a Mermaid flowchart string.
@@ -771,17 +771,8 @@ def create_or_update_ad(component_name: str, usecase: str,
                     break
         except: pass
 
-        # Parse requirements section embedded in the mermaid string (if present)
-        from mermaid_to_ad import parse_requirements_section
-        req_map = parse_requirements_section(mermaid) if "Requirements linked per action:" in mermaid else {}
-
-        # Strip requirements section from the mermaid before parsing the flowchart
-        mermaid_flowchart = mermaid
-        if "Requirements linked per action:" in mermaid:
-            mermaid_flowchart = mermaid[:mermaid.index("Requirements linked per action:")].strip()
-
         # Parse Mermaid to plan, injecting the requirement mapping into each action
-        plan = from_mermaid(mermaid_flowchart, requirements_map=req_map)
+        plan = from_mermaid(mermaid, requirements_map=req_map or {})
         plan["diagram_name"] = diag_name
 
         if existing:

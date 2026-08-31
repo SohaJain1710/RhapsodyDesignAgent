@@ -29,7 +29,8 @@ def apply_design_state(state: dict, component_name: str) -> dict:
         if updated_ad and usecase:
             try:
                 from create_activity_diagram import create_or_update_ad
-                ad_result = create_or_update_ad(component_name, usecase, updated_ad, r)
+                ad_result = create_or_update_ad(component_name, usecase, updated_ad, r,
+                                                req_map=state.get("req_map", {}))
                 print(f"[ApplyDirect] Analysis AD update: {ad_result}", file=sys.stderr)
                 if ad_result.get("errors"):
                     errors.extend(ad_result["errors"])

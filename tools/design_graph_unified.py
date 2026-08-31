@@ -134,8 +134,11 @@ This is the ANALYSIS level — it models WHAT the component must do (the problem
 {req_links}
 
 Rules:
-- If ALL requirements are already covered → reply exactly: NO_CHANGE
-- Only ADD new abstract actions/decisions for uncovered requirements
+- If ALL requirements are already formally linked (all appear in "Requirements Already Covered") → reply exactly: NO_CHANGE
+- If existing actions semantically cover the requirements but the links are missing or incomplete,
+  return the flowchart UNCHANGED followed by the full requirements mapping for ALL actions
+  (existing and new). Do NOT add new actions when existing ones already cover the requirements.
+- Only ADD new abstract actions/decisions when a requirement cannot be covered by any existing action
 - Keep all existing actions unchanged
 - Every new action MUST have stereotype <<analysis>>
 - Actions describe business-level steps — no implementation vocabulary, no C-code concepts
@@ -143,12 +146,12 @@ Rules:
 - Forbidden in analysis perspective: Call Operations, Activity Parameters, Swimlanes
 - Fork/Join is allowed ONLY when the ordering of actions is genuinely unspecified
 - Edge labels (transition conditions) MUST NOT use square brackets: write -->|Yes| or -->|Preconditions met|, NEVER -->|[Yes]|
-- After the flowchart, list which requirements each NEW action covers:
+- After the flowchart, list which requirements EACH action covers (both existing and new):
 
 Requirements linked per action:
     <action_id>: <REQ_ID1>, <REQ_ID2>
 
-Return ONLY the updated Mermaid flowchart followed by the requirements mapping.
+Return ONLY the Mermaid flowchart followed by the requirements mapping.
 """
 
 DESIGN_ELEMENTS_PROMPT = """\
@@ -705,14 +708,6 @@ def update_ad_parse_node(state: DesignState) -> dict:
                 req_mapping[action_id] = reqs
             print(f"[UpdateAD] Existing req mappings carried forward: {req_mapping}")
 
-        # Re-attach requirements section so create_or_update_ad can use it
-        if req_mapping:
-            req_lines = "\n".join(
-                f"    {aid}: {', '.join(rids)}"
-                for aid, rids in req_mapping.items()
-            )
-            existing = existing + "\n\nRequirements linked per action:\n" + req_lines
-
         return {
             "updated_ad"      : existing,
             "existing_req_map": req_mapping,
@@ -748,20 +743,9 @@ def update_ad_parse_node(state: DesignState) -> dict:
     flowchart = flowchart.replace("flowchart TD", "graph TD")\
                          .replace("flowchart LR", "graph LR")
 
-    # Re-attach requirements section to updated_ad so it travels with the
-    # mermaid string all the way to create_or_update_ad → from_mermaid.
-    if merged:
-        req_lines = "\n".join(
-            f"    {aid}: {', '.join(rids)}"
-            for aid, rids in merged.items()
-        )
-        full_ad = flowchart + "\n\nRequirements linked per action:\n" + req_lines
-    else:
-        full_ad = flowchart
-
-    print(f"[UpdateAD] Updated AD: {len(full_ad)} chars, total req mappings: {len(merged)}")
+    print(f"[UpdateAD] Updated AD: {len(flowchart)} chars, total req mappings: {len(merged)}")
     return {
-        "updated_ad"      : full_ad,
+        "updated_ad"      : flowchart,
         "existing_req_map": merged,
     }
 
@@ -843,6 +827,7 @@ def human_review_node(state: DesignState) -> dict:
         "component"     : state["component_name"],
         "usecase"       : state["current_usecase"],
         "updated_ad"    : state.get("updated_ad", ""),
+        "req_map"       : state.get("existing_req_map", {}),
         "new_operations": state.get("new_operations", []),
         "new_interfaces": state.get("new_interfaces", []),
         "ibd_delta"     : state.get("ibd_delta", {}),
