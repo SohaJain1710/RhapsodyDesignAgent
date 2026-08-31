@@ -142,6 +142,7 @@ Rules:
 - MAX ~7 elements per diagram level; group more than that into a named subactivity
 - Forbidden in analysis perspective: Call Operations, Activity Parameters, Swimlanes
 - Fork/Join is allowed ONLY when the ordering of actions is genuinely unspecified
+- Edge labels (transition conditions) MUST NOT use square brackets: write -->|Yes| or -->|Preconditions met|, NEVER -->|[Yes]|
 - After the flowchart, list which requirements each NEW action covers:
 
 Requirements linked per action:
@@ -264,6 +265,7 @@ Rules:
 - Design actions are ABSTRACT — show design intent, not C-code detail
 - Do NOT use fork/join nodes (ordering must be fully defined at design level)
 - Do NOT use Call Operations or Call Behaviours as the primary mechanism
+- Edge labels MUST NOT use square brackets: write -->|Yes| or -->|Condition met|, NEVER -->|[Yes]|
 - Return ONLY the Mermaid flowchart
 
 flowchart TD
@@ -731,6 +733,9 @@ def update_ad_parse_node(state: DesignState) -> dict:
     merged = dict(state.get("existing_req_map", {}))
     merged.update(new_req_mapping)
 
+    # Sanitize edge labels (strip square brackets that break Mermaid)
+    flowchart = _sanitize_mermaid(flowchart)
+
     # Normalize flowchart keyword
     flowchart = flowchart.replace("flowchart TD", "graph TD")\
                          .replace("flowchart LR", "graph LR")
@@ -1010,11 +1015,18 @@ def op_ad_prompt_node(state: OpADState) -> dict:
     }
 
 
+def _sanitize_mermaid(text: str) -> str:
+    """Remove square brackets from edge labels: -->|[Yes]| → -->|Yes|"""
+    import re
+    return re.sub(r'\|\[([^\]]*)\]\|', r'|\1|', text)
+
+
 def op_ad_parse_node(state: OpADState) -> dict:
     mermaid = "flowchart TD\n" + state["llm_response"].strip()
     if "```" in mermaid:
         lines   = mermaid.split("\n")
         mermaid = "\n".join(l for l in lines if not l.startswith("```"))
+    mermaid = _sanitize_mermaid(mermaid)
     return {"llm_response": mermaid}   # reuse field as parsed output
 
 
@@ -1219,11 +1231,8 @@ def build_graph():
         END               : END,
     })
 
-    import sqlite3
-    from langgraph.checkpoint.sqlite import SqliteSaver
-    conn   = sqlite3.connect("RUNTIME_DIR + "/"design_checkpoints.db",
-                             check_same_thread=False)
-    memory = SqliteSaver(conn)
+    from langgraph.checkpoint.memory import MemorySaver
+    memory = MemorySaver()
     return g.compile(
         checkpointer = memory,
     )
