@@ -159,11 +159,16 @@ $RESC  = $RUNTIME -replace "\\","\\\\"
 Write-Host "  OK: config.json written"
 
 $EXTJS = Join-Path $EXTSRC "extension.js"
-$JS = Get-Content $EXTJS -Raw
-$PYESC2 = $PY -replace "\\","\\"
+$JS = Get-Content $EXTJS -Raw -Encoding UTF8
+$ROOTESC = $ROOT -replace "\\","\\\\"
+$PYESC2  = $PY   -replace "\\","\\\\"
+# Patch ROOT_DIR — replace the entire self-invoking function with a fixed string
+$JS = $JS -replace "(?s)const ROOT_DIR = \(\(\) => \{.+?\}\)\(\);","const ROOT_DIR = '$ROOTESC';"
+# Patch PYTHON path
 $JS = $JS -replace "const PYTHON = [^;`r`n]+;","const PYTHON = '$PYESC2';"
-Set-Content $EXTJS $JS -Encoding UTF8
-Write-Host "  OK: extension.js patched"
+# Write UTF-8 without BOM so unicode icons render correctly in VS Code
+[System.IO.File]::WriteAllText($EXTJS, $JS, (New-Object System.Text.UTF8Encoding $false))
+Write-Host "  OK: extension.js patched (ROOT_DIR + PYTHON, UTF-8 no BOM)"
 
 Write-Host ""
 Write-Host "Setup Complete!" -ForegroundColor Green
