@@ -23,6 +23,35 @@ def apply_design_state(state: dict, component_name: str) -> dict:
 
         r = win32com.client.GetActiveObject("Rhapsody2.Application")
 
+        # ── Update Analysis AD if edited ──────────────────────────────────────
+        updated_ad = state.get("updated_ad", "")
+        usecase    = state.get("usecase", "")
+        if updated_ad and usecase:
+            try:
+                from create_activity_diagram import create_or_update_ad
+                ad_result = create_or_update_ad(component_name, usecase, updated_ad, r)
+                print(f"[ApplyDirect] Analysis AD update: {ad_result}", file=sys.stderr)
+                if ad_result.get("errors"):
+                    errors.extend(ad_result["errors"])
+            except Exception as e:
+                print(f"[ApplyDirect] Analysis AD error: {e}", file=sys.stderr)
+                errors.append(f"analysis_ad: {e}")
+
+        # ── Operation ADs from webview editor ─────────────────────────────────
+        op_ads_map = state.get("op_ads", {})
+        if op_ads_map:
+            try:
+                from create_operation_ad import create_operation_ad
+                for op_name, mermaid in op_ads_map.items():
+                    if not mermaid or not mermaid.strip():
+                        continue
+                    ad_result = create_operation_ad(component_name, op_name, mermaid, r)
+                    op_ads.append({"operation": op_name, "result": ad_result})
+                    print(f"[ApplyDirect] Op AD {op_name}: {ad_result.get('success')}", file=sys.stderr)
+            except Exception as e:
+                print(f"[ApplyDirect] Op AD error: {e}", file=sys.stderr)
+                errors.append(f"op_ad: {e}")
+
         # New operations
         new_ops = state.get("new_operations", [])
         if new_ops:
@@ -119,8 +148,47 @@ def apply_design_state(state: dict, component_name: str) -> dict:
         errors.append(f"apply_design_state: {e}")
 
     return {
+        "success"        : len(errors) == 0,
         "approved"       : True,
         "errors"         : errors,
         "new_operations" : state.get("new_operations", []),
         "operation_ads"  : op_ads,
     }
+
+
+if __name__ == "__main__":
+    import argparse, json
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--component", required=True)
+    parser.add_argument("--edit",   required=True, help="Path to edited data JSON from webview")
+    parser.add_argument("--output", required=True, help="Path to write result JSON")
+    args = parser.parse_args()
+
+    with open(args.edit, encoding="utf-8") as f:
+        edit_data = json.load(f)
+
+    # edit_data keys: component, updated_ad, op_ads, new_operations,
+    #                 new_interfaces, ibd_delta
+    result = apply_design_state(edit_data, args.component)
+
+    # Also generate operation ADs from the edited mermaid
+    if edit_data.get("op_ads"):
+        import win32com.client
+        from create_operation_ad import create_operation_ad
+        r = win32com.client.GetActiveObject("Rhapsody2.Application")
+        for op_name, mermaid in edit_data["op_ads"].items():
+            if not mermaid or not mermaid.strip():
+                continue
+            try:
+                ad_result = create_operation_ad(args.component, op_name, mermaid, r)
+                print(f"[ApplyDirect] Op AD {op_name}: {ad_result.get('success')}")
+                result.setdefault("operation_ads", []).append(
+                    {"operation": op_name, "result": ad_result})
+            except Exception as e:
+                print(f"[ApplyDirect] Op AD error {op_name}: {e}")
+
+    with open(args.output, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2)
+
+    print(f"[ApplyDirect] Done. Success={result.get('success', False)}")

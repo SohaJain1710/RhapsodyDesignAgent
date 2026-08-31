@@ -164,17 +164,13 @@ def compute_layout(plan: dict) -> dict:
                 end_y = place(child, cx, branch_y, visited)
                 max_y = max(max_y, end_y)
 
-            # Side branches go to fixed left column
-            SIDE_CX = cx - BRANCH_W
+            # Side branches go left (negative offset)
+            n_side = len(side_branch)
             for i, (child, _) in enumerate(side_branch):
-                child_type = actions_by_id.get(child, {}).get("type", "action")
-                if child_type in ("merge", "junction"):
-                    # Merge nodes: place at left column at current branch_y
-                    # Don't recurse — will be placed by safety net below max_y
-                    pass
-                else:
-                    end_y = place(child, SIDE_CX, branch_y, visited)
-                    max_y = max(max_y, end_y)
+                # All side branches go to the left
+                child_cx = cx - BRANCH_W * (i + 1)
+                end_y = place(child, child_cx, branch_y, visited)
+                max_y = max(max_y, end_y)
 
             return max_y
 
@@ -725,3 +721,74 @@ if __name__ == "__main__":
     result = create_activity_diagram(dd_pkg, args.name, TEST_PLAN, rhapsody,
                                      conventions=conv)
     print(f"\n[AD] Result: {result}")
+
+
+# ── High-level helper: create or update Analysis AD from Mermaid ───────────────
+def create_or_update_ad(component_name: str, usecase: str,
+                         mermaid: str, rhapsody=None) -> dict:
+    """
+    Update (or create) the Analysis Activity Diagram for a use case
+    from a Mermaid flowchart string.
+
+    Finds the existing AD in the DD package, deletes its elements,
+    and redraws from the Mermaid plan — effectively an update in place.
+    """
+    import sys, os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from mermaid_to_ad import from_mermaid
+    from read_detailed_ad import find_package_recursive, find_dd_packages
+
+    errors = []
+    try:
+        import win32com.client
+        if rhapsody is None:
+            rhapsody = win32com.client.GetActiveObject("Rhapsody2.Application")
+        project  = rhapsody.activeProject()
+
+        from rhapsody_com import get_sw_model
+        sw       = get_sw_model(project) or project
+        comp_pkg = find_package_recursive(sw, component_name)
+        if not comp_pkg:
+            return {"success": False, "errors": [f"Component {component_name} not found"]}
+
+        dd_pkgs = find_dd_packages(comp_pkg)
+        if not dd_pkgs:
+            return {"success": False, "errors": ["No DD package found"]}
+        dd_pkg = next((p for p in dd_pkgs if "Cfg" not in p.name), dd_pkgs[0])
+
+        # Find diagram name — normalize usecase name
+        uc_norm = usecase.replace(" ", "")
+        diag_name = uc_norm + "AD"
+        existing  = None
+        try:
+            bd = dd_pkg.behavioralDiagrams
+            for i in range(1, bd.Count + 1):
+                d = bd.Item(i)
+                d_norm = d.name.lower().replace(" ", "")
+                if uc_norm.lower() in d_norm:
+                    existing  = d
+                    diag_name = d.name
+                    break
+        except: pass
+
+        # Parse Mermaid to plan
+        plan = from_mermaid(mermaid)
+        plan["diagram_name"] = diag_name
+
+        if existing:
+            # Delete existing diagram and recreate
+            try:
+                existing.deleteFromProject()
+                print(f"[ADUpdate] Deleted existing: {diag_name}", file=sys.stderr)
+            except Exception as e:
+                print(f"[ADUpdate] Could not delete existing AD: {e}", file=sys.stderr)
+
+        result = create_activity_diagram(dd_pkg, diag_name, plan, rhapsody)
+        project.save()
+        return result
+
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[ADUpdate] ERROR: {e}", file=sys.stderr)
+        return {"success": False, "errors": [str(e)]}
