@@ -119,15 +119,15 @@ Respond ONLY with valid JSON:
 """
 
 UPDATE_AD_PROMPT = """\
-You are a SysML architect working on an AB12 ANALYSIS-LEVEL Activity Diagram (AB12-Analysis perspective).
-Update the existing diagram to cover the new requirements.
+You are a SysML architect updating an AB12 Analysis Activity Diagram (AB12-Analysis perspective in Rhapsody).
+This is the ANALYSIS level — it models WHAT the component must do (the problem), not HOW (the solution).
 
 # Use Case: {usecase}
 
 # Requirements to Cover
 {requirements}
 
-# Existing Analysis AD (flowchart only)
+# Existing Analysis Activity Diagram (Mermaid)
 {existing_ad}
 
 # Requirements Already Covered by Existing Actions
@@ -137,15 +137,15 @@ Rules:
 - If ALL requirements are already covered → reply exactly: NO_CHANGE
 - Only ADD new abstract actions/decisions for uncovered requirements
 - Keep all existing actions unchanged
-- Every new action MUST carry stereotype <<analysis>> — mark it in the requirements mapping below
-- Actions model the PROBLEM, not the solution — use business-level vocabulary, no implementation detail
-- MAX ~7 elements per diagram level; if adding more, group related actions into a named subactivity
-- Do NOT use Call Operations, Activity Parameters, or Swimlanes (forbidden in analysis perspective)
-- Fork/Join nodes are only valid when the ordering of actions is genuinely unspecified
-- After the flowchart, add a section mapping NEW actions to requirements:
+- Every new action MUST have stereotype <<analysis>>
+- Actions describe business-level steps — no implementation vocabulary, no C-code concepts
+- MAX ~7 elements per diagram level; group more than that into a named subactivity
+- Forbidden in analysis perspective: Call Operations, Activity Parameters, Swimlanes
+- Fork/Join is allowed ONLY when the ordering of actions is genuinely unspecified
+- After the flowchart, list which requirements each NEW action covers:
 
 Requirements linked per action:
-  <action_id> [<<analysis>>]: <REQ_ID1>, <REQ_ID2>
+  <action_name> [<<analysis>>]: <REQ_ID1>, <REQ_ID2>
 
 Return ONLY the updated Mermaid flowchart followed by the requirements mapping.
 """
@@ -240,8 +240,9 @@ Respond ONLY with valid JSON:
 """
 
 OP_AD_PROMPT = """\
-You are a SysML architect working on an AB12 DESIGN-LEVEL Activity Diagram (AB12-Design perspective).
-Generate the design activity for the following operation.
+You are a SysML architect generating an AB12 Operation Activity Diagram (AB12-Design perspective in Rhapsody).
+This is the DESIGN level — one activity diagram per operation, showing HOW the operation behaves.
+It is distinct from the Analysis Activity Diagram; the analysis AD is provided only as context.
 
 # Operation
 Name        : {op_name}
@@ -250,22 +251,20 @@ Return type : {return_type}
 Rationale   : {rationale}
 Requirements: {req_ids}
 
-# Analysis AD context (the actions this design must trace back to)
+# Analysis Activity Diagram (context only — shows the analysis actions this operation implements)
 {updated_ad}
 
 Rules:
 - Use ([Start]) and ([End]) for start/end nodes
 - Use {{condition?}} for decision nodes
 - Use ((merge)) for merge nodes after branches
-- Every action MUST carry stereotype <<design>>
-- Use between 1 and 3 design actions — this is sufficient to show the main idea of the implementation
-  (more than 5 actions requires strong justification)
-- Steps are ABSTRACT — show the design intent, not C-code implementation detail
-- Do NOT use fork/join nodes in design activities (ordering must be fully defined at this level)
+- Every action MUST have stereotype <<design>>
+- Use between 1 and 3 design actions — enough to show the main idea of the implementation
+  (more than 5 requires strong justification)
+- Design actions are ABSTRACT — show design intent, not C-code detail
+- Do NOT use fork/join nodes (ordering must be fully defined at design level)
 - Do NOT use Call Operations or Call Behaviours as the primary mechanism
-- Each design action must correspond to (trace back to) one analysis action from the context above;
-  add a comment after the flowchart listing: <design_action>: traces <<analysis_action>>
-- Return ONLY the Mermaid flowchart followed by the trace mapping
+- Return ONLY the Mermaid flowchart
 
 flowchart TD
 """
