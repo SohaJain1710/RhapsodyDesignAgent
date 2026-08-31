@@ -37,22 +37,7 @@ def apply_design_state(state: dict, component_name: str) -> dict:
                 print(f"[ApplyDirect] Analysis AD error: {e}", file=sys.stderr)
                 errors.append(f"analysis_ad: {e}")
 
-        # ── Operation ADs from webview editor ─────────────────────────────────
-        op_ads_map = state.get("op_ads", {})
-        if op_ads_map:
-            try:
-                from create_operation_ad import create_operation_ad
-                for op_name, mermaid in op_ads_map.items():
-                    if not mermaid or not mermaid.strip():
-                        continue
-                    ad_result = create_operation_ad(component_name, op_name, mermaid, r)
-                    op_ads.append({"operation": op_name, "result": ad_result})
-                    print(f"[ApplyDirect] Op AD {op_name}: {ad_result.get('success')}", file=sys.stderr)
-            except Exception as e:
-                print(f"[ApplyDirect] Op AD error: {e}", file=sys.stderr)
-                errors.append(f"op_ad: {e}")
-
-        # New operations
+        # New operations — must be created BEFORE operation ADs
         new_ops = state.get("new_operations", [])
         if new_ops:
             print(f"[ApplyDirect] Adding {len(new_ops)} operations", file=sys.stderr)
@@ -98,6 +83,21 @@ def apply_design_state(state: dict, component_name: str) -> dict:
             res = create_ibd(plan, r)
             if res.get("errors"):
                 errors.extend(res["errors"])
+
+        # Operation ADs from webview editor — processed AFTER operations are created
+        op_ads_map = state.get("op_ads", {})
+        if op_ads_map:
+            try:
+                from create_operation_ad import create_operation_ad
+                for op_name, mermaid in op_ads_map.items():
+                    if not mermaid or not mermaid.strip():
+                        continue
+                    ad_result = create_operation_ad(component_name, op_name, mermaid, r)
+                    op_ads.append({"operation": op_name, "result": ad_result})
+                    print(f"[ApplyDirect] Op AD {op_name}: {ad_result.get('success')}", file=sys.stderr)
+            except Exception as e:
+                print(f"[ApplyDirect] Op AD error: {e}", file=sys.stderr)
+                errors.append(f"op_ad: {e}")
 
         # Operation ADs — only when LLM relay is running
         try:
