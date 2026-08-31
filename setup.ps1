@@ -66,8 +66,7 @@ if (-not $PYTHON) {
 
 if (-not $PYTHON) {
     Write-Host "  ERROR: Python not found." -ForegroundColor Red
-    Write-Host "  Searched: PATH, C:	oolbase\python, C:\Python3xx, AppData" -ForegroundColor Red
-    Write-Host "  Please install Python 3.11 from https://python.org" -ForegroundColor Red
+    Write-Host "  Searched: C:\toolbase\python, PATH, C:\Python3xx" -ForegroundColor Red
     Read-Host "Press Enter to exit"; exit 1
 }
 

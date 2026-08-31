@@ -145,7 +145,7 @@ Rules:
 - After the flowchart, list which requirements each NEW action covers:
 
 Requirements linked per action:
-  <action_name> [<<analysis>>]: <REQ_ID1>, <REQ_ID2>
+    <action_id>: <REQ_ID1>, <REQ_ID2>
 
 Return ONLY the updated Mermaid flowchart followed by the requirements mapping.
 """
