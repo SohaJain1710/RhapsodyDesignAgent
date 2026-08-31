@@ -291,8 +291,8 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
         }
 
         stream.markdown('\n---\n**Choose an action:**');
-        stream.button({ command: 'rhapsody.design.apply',    title: '✅ Apply & Draw', arguments: [comp] });
-        stream.button({ command: 'rhapsody.design.feedback', title: '💬 Provide Feedback', arguments: [comp] });
+        stream.button({ command: 'rhapsody.design.apply',  title: 'Apply & Draw',  arguments: [comp] });
+        stream.button({ command: 'rhapsody.design.review', title: 'Review & Edit', arguments: [comp, outputFile] });
         return;
     }
 
@@ -396,7 +396,342 @@ async function runLlmRelay(token) {
     };
 }
 
-// ── Chat participant ─────────────────────────────────────────────────────
+// ── Design Review Webview ─────────────────────────────────────────────────────
+function openReviewWebview(context, data, comp, outputFile, stream, token) {
+    outputChannel && outputChannel.appendLine(`[review] opening webview for ${comp}, usecase=${data.usecase}, data keys=${Object.keys(data).join(',')}`);
+    const panel = vscode.window.createWebviewPanel(
+        'rhapsodyDesignReview',
+        `Design Review — ${data.usecase || comp}`,
+        vscode.ViewColumn.One,
+        { enableScripts: true, retainContextWhenHidden: true }
+    );
+
+    const safeData = JSON.stringify({
+        component       : comp,
+        usecase         : data.usecase || '',
+        updated_ad      : data.updated_ad || '',
+        new_operations  : data.new_operations || [],
+        new_interfaces  : data.new_interfaces || [],
+        ibd_delta       : data.ibd_delta || { ports: [], links: [] },
+    });
+
+    panel.webview.html = getReviewWebviewHtml(safeData, comp);
+
+    panel.webview.onDidReceiveMessage(async msg => {
+        if (msg.command === 'apply') {
+            panel.dispose();
+            const editFile  = path.join(RUNTIME_DIR, `_edit_${comp}.json`);
+            const resultFile = path.join(RUNTIME_DIR, `_apply_result_${comp}.json`);
+            fs.writeFileSync(editFile, JSON.stringify(msg.data), 'utf8');
+
+            vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: 'Applying design to Rhapsody...',
+                cancellable: false,
+            }, async () => {
+                // Start LM proxy relay using a fresh token
+                const cts = new vscode.CancellationTokenSource();
+                const stopRelay = await runLlmRelay(cts.token);
+                try {
+                    const applyScript = path.join(ROOT_DIR, 'tools', 'apply_design.py');
+                    await runPython(applyScript, [
+                        '--component', comp,
+                        '--edit',      editFile,
+                        '--output',    resultFile,
+                    ]);
+                    const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
+                    if (result.success) {
+                        vscode.window.showInformationMessage(`✅ Design applied to Rhapsody successfully.`);
+                    } else {
+                        vscode.window.showWarningMessage(`⚠️ Applied with errors: ${(result.errors||[]).join(', ')}`);
+                    }
+                } catch(e) {
+                    vscode.window.showErrorMessage(`❌ Apply failed: ${e.message}`);
+                    outputChannel && outputChannel.appendLine(`[apply] ERROR: ${e.message}`);
+                } finally {
+                    stopRelay();
+                    cts.dispose();
+                }
+            });
+        } else if (msg.command === 'cancel') {
+            panel.dispose();
+        }
+    }, undefined, context ? context.subscriptions : []);
+}
+
+function getReviewWebviewHtml(safeData, comp) {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Design Review</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--vscode-font-family, sans-serif); font-size: 13px;
+       background: var(--vscode-editor-background, #1e1e1e);
+       color: var(--vscode-editor-foreground, #d4d4d4); padding: 16px; }
+h1  { font-size: 18px; margin-bottom: 16px; }
+h2  { font-size: 13px; margin: 16px 0 8px; color: #4fc1ff; text-transform: uppercase; }
+.section { background: var(--vscode-editorWidget-background, #252526);
+           border: 1px solid #3c3c3c; border-radius: 4px; padding: 12px; margin-bottom: 12px; }
+.item { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid #3c3c3c; }
+.item:last-child { border-bottom: none; }
+.item input[type=checkbox] { margin-top: 2px; width: 15px; height: 15px; cursor: pointer; }
+.details { flex: 1; }
+.title { font-weight: bold; margin-bottom: 3px; }
+.meta  { font-size: 11px; color: #888; margin-bottom: 5px; }
+.fields { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 5px; }
+.field  { display: flex; flex-direction: column; gap: 2px; }
+.field label { font-size: 10px; color: #888; }
+.field input, .field select {
+  background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;
+  border-radius: 3px; padding: 3px 6px; font-size: 12px; min-width: 120px; }
+.arg-list { margin-top: 5px; display: flex; flex-direction: column; gap: 3px; }
+.arg-row { display: flex; gap: 6px; align-items: center; font-size: 11px; color: #888; }
+.arg-row input { width: 130px; }
+.mermaid-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.med { display: flex; flex-direction: column; gap: 6px; }
+.med label { font-size: 12px; font-weight: bold; color: #4fc1ff; }
+.med textarea { width: 100%; height: 200px; resize: vertical;
+  background: #1e1e1e; color: #d4d4d4; border: 1px solid #555;
+  border-radius: 3px; padding: 8px; font-family: monospace; font-size: 12px; }
+.preview { background: #fff; border-radius: 4px; padding: 10px; min-height: 120px; overflow: auto; }
+.btn-row { display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end; }
+button { padding: 8px 18px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: bold; }
+.btn-apply  { background: #0e7a0d; color: #fff; }
+.btn-cancel { background: #3a3a3a; color: #d4d4d4; }
+.btn-ref    { background: #1a6fab; color: #fff; padding: 4px 10px; font-size: 11px; }
+.badge-new  { background: #14532d; color: #86efac; border-radius: 3px; padding: 1px 5px; font-size: 10px; margin-left: 5px; }
+code { background: #264f78; color: #9cdcfe; border-radius: 3px; padding: 1px 4px; font-size: 12px; }
+.op-select { margin-bottom: 8px; }
+.op-select label { font-size: 12px; color: #888; }
+.op-select select { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555; border-radius: 3px; padding: 4px 8px; font-size: 12px; }
+</style>
+</head>
+<body>
+<script>mermaid.initialize({ startOnLoad: false, theme: 'dark' });</script>
+<h1>⏸️ Design Review — ${comp}</h1>
+<div id="app"></div>
+<script>
+const vscodeApi = acquireVsCodeApi();
+const RAW  = ${safeData};
+const comp = '${comp}';
+
+let S = {
+    updated_ad     : RAW.updated_ad || '',
+    op_ads         : {},
+    new_operations : RAW.new_operations.map(o => ({ ...o, _sel: true })),
+    new_interfaces : RAW.new_interfaces.map(i => ({ ...i, _sel: true })),
+    ports          : ((RAW.ibd_delta||{}).ports||[]).map(p => ({ ...p, _sel: true })),
+    links          : ((RAW.ibd_delta||{}).links||[]).map(l => ({ ...l, _sel: true })),
+    sel_op         : RAW.new_operations.length ? RAW.new_operations[0].name : null,
+};
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+function el(tag, cls, html) {
+    const e = document.createElement(tag);
+    if (cls)  e.className = cls;
+    if (html) e.innerHTML = html;
+    return e;
+}
+function inp(val, cb, w) {
+    const e = document.createElement('input');
+    e.type = 'text'; e.value = val || '';
+    if (w) e.style.width = w;
+    e.oninput = () => cb(e.value);
+    return e;
+}
+function field(label, el) {
+    const d = document.createElement('div'); d.className = 'field';
+    const l = document.createElement('label'); l.textContent = label;
+    d.appendChild(l); d.appendChild(el); return d;
+}
+function selEl(opts, cur, cb) {
+    const s = document.createElement('select');
+    opts.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; if (v === cur) o.selected = true; s.appendChild(o); });
+    s.onchange = () => cb(s.value); return s;
+}
+
+// ── render ────────────────────────────────────────────────────────────────────
+function render() {
+    const app = document.getElementById('app');
+    app.innerHTML = '';
+
+    // Operations
+    const opsDiv = el('div', 'section');
+    opsDiv.appendChild(el('h2', '', '⚙️ Operations'));
+    if (!S.new_operations.length) opsDiv.appendChild(el('p', '', '<span style="color:#888">No new operations proposed.</span>'));
+    S.new_operations.forEach((op, i) => {
+        const item = el('div', 'item');
+        const cb   = document.createElement('input'); cb.type = 'checkbox'; cb.checked = op._sel;
+        cb.onchange = () => { S.new_operations[i]._sel = cb.checked; };
+        item.appendChild(cb);
+        const det = el('div', 'details');
+        det.appendChild(el('div', 'title', '<code>' + op.name + '</code><span class="badge-new">NEW</span>'));
+        det.appendChild(el('div', 'meta', 'Returns: <code>' + (op.return_type||'void') + '</code> | ' + (op.visibility||'private') + ' | ' + (op.req_ids||[]).join(', ')));
+        const fields = el('div', 'fields');
+        fields.appendChild(field('Name',        inp(op.name,            v => S.new_operations[i].name = v, '160px')));
+        fields.appendChild(field('Return Type', inp(op.return_type||'void', v => S.new_operations[i].return_type = v, '100px')));
+        fields.appendChild(field('Visibility',  selEl(['private','public','protected'], op.visibility||'private', v => S.new_operations[i].visibility = v)));
+        det.appendChild(fields);
+        if (op.arguments && op.arguments.length) {
+            const al = el('div', 'arg-list');
+            op.arguments.forEach((arg, ai) => {
+                const row = el('div', 'arg-row', 'name:');
+                row.appendChild(inp(arg.name, v => S.new_operations[i].arguments[ai].name = v, '120px'));
+                const t = el('span', '', ' type:'); row.appendChild(t);
+                row.appendChild(inp(arg.type||'', v => S.new_operations[i].arguments[ai].type = v, '120px'));
+                al.appendChild(row);
+            });
+            det.appendChild(al);
+        }
+        item.appendChild(det);
+        opsDiv.appendChild(item);
+    });
+    app.appendChild(opsDiv);
+
+    // Interfaces
+    if (S.new_interfaces.length) {
+        const intfDiv = el('div', 'section');
+        intfDiv.appendChild(el('h2', '', '🔌 Interfaces'));
+        S.new_interfaces.forEach((intf, i) => {
+            const item = el('div', 'item');
+            const cb   = document.createElement('input'); cb.type = 'checkbox'; cb.checked = intf._sel;
+            cb.onchange = () => { S.new_interfaces[i]._sel = cb.checked; };
+            item.appendChild(cb);
+            const det = el('div', 'details');
+            det.appendChild(el('div', 'title', '<code>' + intf.name + '</code><span class="badge-new">NEW</span>'));
+            det.appendChild(el('div', 'meta', 'Realized by: ' + (intf.realized_by||'—')));
+            const fields = el('div', 'fields');
+            fields.appendChild(field('Name',        inp(intf.name,            v => S.new_interfaces[i].name = v, '160px')));
+            fields.appendChild(field('Realized By', inp(intf.realized_by||'', v => S.new_interfaces[i].realized_by = v, '160px')));
+            det.appendChild(fields);
+            item.appendChild(det);
+            intfDiv.appendChild(item);
+        });
+        app.appendChild(intfDiv);
+    }
+
+    // IBD Ports
+    if (S.ports.length) {
+        const ibdDiv = el('div', 'section');
+        ibdDiv.appendChild(el('h2', '', '🔗 IBD Ports'));
+        S.ports.forEach((port, i) => {
+            const item = el('div', 'item');
+            const cb   = document.createElement('input'); cb.type = 'checkbox'; cb.checked = port._sel;
+            cb.onchange = () => { S.ports[i]._sel = cb.checked; };
+            item.appendChild(cb);
+            const det = el('div', 'details');
+            det.appendChild(el('div', 'title', '<code>' + port.name + '</code>'));
+            det.appendChild(el('div', 'meta', 'Provides: ' + (port.provided||[]).join(', ') + ' | Requires: ' + (port.required||[]).join(', ')));
+            const fields = el('div', 'fields');
+            fields.appendChild(field('Port Name', inp(port.name, v => S.ports[i].name = v, '160px')));
+            det.appendChild(fields);
+            item.appendChild(det);
+            ibdDiv.appendChild(item);
+        });
+        app.appendChild(ibdDiv);
+    }
+
+    // Mermaid editors
+    const mDiv = el('div', 'section');
+    mDiv.appendChild(el('h2', '', '📊 Activity Diagrams'));
+
+    // Op selector
+    if (S.new_operations.length) {
+        const opSel = el('div', 'op-select');
+        opSel.appendChild(el('label', '', 'Operation AD for: '));
+        const opNames = S.new_operations.map(o => o.name);
+        opSel.appendChild(selEl(opNames, S.sel_op || opNames[0], v => {
+            S.sel_op = v;
+            document.getElementById('op-ad-ta').value = S.op_ads[v] || defaultOpAD(S.new_operations.find(o => o.name === v));
+            renderMermaid('op-preview', document.getElementById('op-ad-ta').value);
+        }));
+        mDiv.appendChild(opSel);
+    }
+
+    const grid = el('div', 'mermaid-grid');
+
+    // Analysis AD editor
+    const anaEd = el('div', 'med');
+    anaEd.appendChild(el('label', '', '🔄 Analysis AD'));
+    const anaTa = document.createElement('textarea'); anaTa.value = S.updated_ad;
+    anaTa.oninput = () => { S.updated_ad = anaTa.value; renderMermaid('ana-preview', anaTa.value); };
+    anaEd.appendChild(anaTa);
+    const anaRef = el('button', 'btn-ref', '↻ Preview'); anaRef.onclick = () => renderMermaid('ana-preview', anaTa.value);
+    anaEd.appendChild(anaRef);
+    const anaPrev = el('div', 'preview'); anaPrev.id = 'ana-preview';
+    anaEd.appendChild(anaPrev);
+    grid.appendChild(anaEd);
+
+    // Operation AD editor
+    const opEd = el('div', 'med');
+    opEd.appendChild(el('label', '', '⚙️ Operation AD'));
+    const opTa = document.createElement('textarea'); opTa.id = 'op-ad-ta';
+    const curOp = S.new_operations.find(o => o.name === S.sel_op) || S.new_operations[0];
+    opTa.value = S.sel_op ? (S.op_ads[S.sel_op] || defaultOpAD(curOp)) : 'flowchart TD\\n    Start([Start]) --> End([End])';
+    opTa.oninput = () => { if (S.sel_op) S.op_ads[S.sel_op] = opTa.value; renderMermaid('op-preview', opTa.value); };
+    opEd.appendChild(opTa);
+    const opRef = el('button', 'btn-ref', '↻ Preview'); opRef.onclick = () => renderMermaid('op-preview', opTa.value);
+    opEd.appendChild(opRef);
+    const opPrev = el('div', 'preview'); opPrev.id = 'op-preview';
+    opEd.appendChild(opPrev);
+    grid.appendChild(opEd);
+
+    mDiv.appendChild(grid);
+    app.appendChild(mDiv);
+
+    // Buttons
+    const btnRow = el('div', 'btn-row');
+    const cancelBtn = el('button', 'btn-cancel', '✗ Cancel');
+    cancelBtn.onclick = () => vscodeApi.postMessage({ command: 'cancel' });
+    const applyBtn = el('button', 'btn-apply', '✅ Apply to Rhapsody');
+    applyBtn.onclick = applyChanges;
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(applyBtn);
+    app.appendChild(btnRow);
+
+    // Auto-preview
+    setTimeout(() => renderMermaid('ana-preview', S.updated_ad), 100);
+    if (S.sel_op) setTimeout(() => renderMermaid('op-preview', opTa.value), 150);
+}
+
+function defaultOpAD(op) {
+    if (!op) return 'flowchart TD\\n    Start([Start]) --> End([End])';
+    return 'flowchart TD\\n    Start([Start])\\n    Validate[Validate inputs]\\n    Execute[Execute ' + op.name + ']\\n    Return[Return result]\\n    End([End])\\n    Start --> Validate\\n    Validate --> Execute\\n    Execute --> Return\\n    Return --> End';
+}
+
+async function renderMermaid(id, code) {
+    const el = document.getElementById(id);
+    if (!el || !code || !code.trim()) return;
+    try {
+        const { svg } = await mermaid.render('m' + id + Date.now(), code);
+        el.innerHTML = svg;
+    } catch(e) {
+        el.innerHTML = '<span style="color:#f87171;font-size:11px">⚠ ' + e.message + '</span>';
+    }
+}
+
+function applyChanges() {
+    vscodeApi.postMessage({ command: 'apply', data: {
+        component      : comp,
+        usecase        : RAW.usecase,
+        updated_ad     : S.updated_ad,
+        op_ads         : S.op_ads,
+        new_operations : S.new_operations.filter(o => o._sel).map(o => { const {_sel,...r}=o; return r; }),
+        new_interfaces : S.new_interfaces.filter(i => i._sel).map(i => { const {_sel,...r}=i; return r; }),
+        ibd_delta      : {
+            ports: S.ports.filter(p => p._sel).map(p => { const {_sel,...r}=p; return r; }),
+            links: S.links.filter(l => l._sel).map(l => { const {_sel,...r}=l; return r; }),
+        },
+    }});
+}
+
+render();
+</script>
+</body>
+</html>`;
 async function handleRhapsodyChat(request, context, stream, token) {
     const commandName = request.command || '';
     outputChannel && outputChannel.appendLine('[debug] command=' + commandName + ' prompt=' + request.prompt.substring(0, 50));
@@ -480,12 +815,21 @@ function activate(context) {
     });
     context.subscriptions.push(applyCmd);
 
-    const feedbackCmd = vscode.commands.registerCommand('rhapsody.design.feedback', async (component) => {
-        const feedback = await vscode.window.showInputBox({ prompt: 'Enter your feedback', placeHolder: 'e.g. The operation name should follow rb_sdm_ convention...' });
-        if (!feedback) return;
-        await vscode.commands.executeCommand('workbench.action.chat.open', { query: '@rhapsody /design_resume ' + component + ' ' + feedback });
-    });
-    context.subscriptions.push(feedbackCmd);
+
+    const reviewCmd = vscode.commands.registerCommand('rhapsody.design.review',
+        async (component, outputFile) => {
+            if (!outputFile || !fs.existsSync(outputFile)) {
+                vscode.window.showErrorMessage('Design output not found. Run @rhapsody /design first.');
+                return;
+            }
+            const output = JSON.parse(fs.readFileSync(outputFile, 'utf8'));
+            const data   = output.data || {};
+            openReviewWebview(context, data, component, outputFile,
+                pendingSession && pendingSession.stream,
+                pendingSession && pendingSession.token);
+        }
+    );
+    context.subscriptions.push(reviewCmd);
 
     outputChannel.appendLine('[Rhapsody] Extension activated (LM proxy on :3000)');
 }
