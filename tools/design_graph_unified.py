@@ -705,6 +705,14 @@ def update_ad_parse_node(state: DesignState) -> dict:
                 req_mapping[action_id] = reqs
             print(f"[UpdateAD] Existing req mappings carried forward: {req_mapping}")
 
+        # Re-attach requirements section so create_or_update_ad can use it
+        if req_mapping:
+            req_lines = "\n".join(
+                f"    {aid}: {', '.join(rids)}"
+                for aid, rids in req_mapping.items()
+            )
+            existing = existing + "\n\nRequirements linked per action:\n" + req_lines
+
         return {
             "updated_ad"      : existing,
             "existing_req_map": req_mapping,
@@ -740,9 +748,20 @@ def update_ad_parse_node(state: DesignState) -> dict:
     flowchart = flowchart.replace("flowchart TD", "graph TD")\
                          .replace("flowchart LR", "graph LR")
 
-    print(f"[UpdateAD] Updated AD: {len(flowchart)} chars, total req mappings: {len(merged)}")
+    # Re-attach requirements section to updated_ad so it travels with the
+    # mermaid string all the way to create_or_update_ad → from_mermaid.
+    if merged:
+        req_lines = "\n".join(
+            f"    {aid}: {', '.join(rids)}"
+            for aid, rids in merged.items()
+        )
+        full_ad = flowchart + "\n\nRequirements linked per action:\n" + req_lines
+    else:
+        full_ad = flowchart
+
+    print(f"[UpdateAD] Updated AD: {len(full_ad)} chars, total req mappings: {len(merged)}")
     return {
-        "updated_ad"      : flowchart,
+        "updated_ad"      : full_ad,
         "existing_req_map": merged,
     }
 

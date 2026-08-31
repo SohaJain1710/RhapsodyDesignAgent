@@ -771,8 +771,17 @@ def create_or_update_ad(component_name: str, usecase: str,
                     break
         except: pass
 
-        # Parse Mermaid to plan
-        plan = from_mermaid(mermaid)
+        # Parse requirements section embedded in the mermaid string (if present)
+        from mermaid_to_ad import parse_requirements_section
+        req_map = parse_requirements_section(mermaid) if "Requirements linked per action:" in mermaid else {}
+
+        # Strip requirements section from the mermaid before parsing the flowchart
+        mermaid_flowchart = mermaid
+        if "Requirements linked per action:" in mermaid:
+            mermaid_flowchart = mermaid[:mermaid.index("Requirements linked per action:")].strip()
+
+        # Parse Mermaid to plan, injecting the requirement mapping into each action
+        plan = from_mermaid(mermaid_flowchart, requirements_map=req_map)
         plan["diagram_name"] = diag_name
 
         if existing:
