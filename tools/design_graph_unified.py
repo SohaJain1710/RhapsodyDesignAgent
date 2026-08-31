@@ -1219,11 +1219,8 @@ def build_graph():
         END               : END,
     })
 
-    import sqlite3
-    from langgraph.checkpoint.sqlite import SqliteSaver
-    conn   = sqlite3.connect("RUNTIME_DIR + "/"design_checkpoints.db",
-                             check_same_thread=False)
-    memory = SqliteSaver(conn)
+    from langgraph.checkpoint.memory import MemorySaver
+    memory = MemorySaver()
     return g.compile(
         checkpointer = memory,
     )
