@@ -119,16 +119,15 @@ Respond ONLY with valid JSON:
 """
 
 UPDATE_AD_PROMPT = """\
-You are a SysML architect. Update the existing ANALYSIS-LEVEL Activity Diagram
-to cover the new requirements. Keep it ABSTRACT — use case level only.
-No implementation details. Actions should be business-level steps.
+You are a SysML architect updating an AB12 Analysis Activity Diagram (AB12-Analysis perspective in Rhapsody).
+This is the ANALYSIS level — it models WHAT the component must do (the problem), not HOW (the solution).
 
 # Use Case: {usecase}
 
 # Requirements to Cover
 {requirements}
 
-# Existing Analysis AD (flowchart only)
+# Existing Analysis Activity Diagram (Mermaid)
 {existing_ad}
 
 # Requirements Already Covered by Existing Actions
@@ -138,18 +137,22 @@ Rules:
 - If ALL requirements are already covered → reply exactly: NO_CHANGE
 - Only ADD new abstract actions/decisions for uncovered requirements
 - Keep all existing actions unchanged
-- No C-code level detail — business actions only
-- After the flowchart, add a section mapping NEW actions to requirements:
+- Every new action MUST have stereotype <<analysis>>
+- Actions describe business-level steps — no implementation vocabulary, no C-code concepts
+- MAX ~7 elements per diagram level; group more than that into a named subactivity
+- Forbidden in analysis perspective: Call Operations, Activity Parameters, Swimlanes
+- Fork/Join is allowed ONLY when the ordering of actions is genuinely unspecified
+- After the flowchart, list which requirements each NEW action covers:
 
 Requirements linked per action:
-  <action_id>: <REQ_ID1>, <REQ_ID2>
+  <action_name> [<<analysis>>]: <REQ_ID1>, <REQ_ID2>
 
 Return ONLY the updated Mermaid flowchart followed by the requirements mapping.
 """
 
 DESIGN_ELEMENTS_PROMPT = """\
-You are a SysML architect. Identify what new operations and interfaces are needed
-to implement the updated activity diagram.
+You are a SysML architect working on AB12 Static Detailed Design.
+Identify what new operations and interfaces are needed to implement the updated activity diagram.
 
 # Use Case: {usecase}
 
@@ -167,16 +170,19 @@ to implement the updated activity diagram.
 
 Rules:
 - Reuse existing operations where possible — only add new ones if truly needed
-- New operation names: <ComponentPrefix>_<VerbNoun> (follow existing naming convention from BDD)
+- New operation names: follow existing naming convention from BDD (rb_<componentPrefix>_<VerbNoun>)
+- Module names MUST follow: rb_<moduleShortName>_<ModuleName>  (e.g. rb_hvsm_HighVoltageSupplyMonitoring)
+- Interface names MUST follow: rb_<moduleShortName>_<InterfaceName>Intf  (e.g. rb_hvsm_ProvideConfigStructureIntf)
 - Use existing types from BDD — do NOT invent new types
 - For each action in the AD, map it to an existing or new operation
+- New functionality: map each new action to exactly ONE module (1 action → 1 module)
 
 Respond ONLY with valid JSON:
 {{
   "action_op_map": {{"AD_action_name": "operation_name"}},
   "new_operations": [
     {{
-      "name": "<prefix>_NewOp",
+      "name": "rb_<prefix>_NewOp",
       "return_type": "<existing_result_type>",
       "arguments": [{{"name": "param_name", "type": "<existing_type>"}}],
       "visibility": "public",
@@ -187,7 +193,7 @@ Respond ONLY with valid JSON:
   ],
   "new_interfaces": [
     {{
-      "name": "<prefix>_NewIntf",
+      "name": "rb_<moduleShortName>_<InterfaceName>Intf",
       "stereotypes": ["Interface"],
       "operations": [],
       "attributes": [],
@@ -195,13 +201,14 @@ Respond ONLY with valid JSON:
     }}
   ],
   "realizations": [
-    {{"specific": "{usecase}", "general": "<prefix>_NewIntf"}}
+    {{"specific": "{usecase}", "general": "rb_<moduleShortName>_<InterfaceName>Intf"}}
   ]
 }}
 """
 
 DESIGN_IBD_PROMPT = """\
-You are a SysML architect. Propose IBD changes (new ports) for new interfaces.
+You are a SysML architect working on AB12 Static Detailed Design (IBD level).
+Propose IBD changes (new ports) for new interfaces.
 
 # New Interfaces
 {new_interfaces}
@@ -211,22 +218,31 @@ You are a SysML architect. Propose IBD changes (new ports) for new interfaces.
 
 Rules:
 - Only add ports for genuinely new interfaces not already in the IBD
-- Port names: <prefix>_<InterfaceName>Prt (follow existing naming convention from IBD)
+- Port names MUST follow: rb_<moduleShortName>_<PortName>Prt  (e.g. rb_hvsm_VoltageRegulatorMonitoringPrt)
 - Provided interfaces: +, Required: -
 - Only propose what's missing
+- Two IBDs are required per module: one at the DetailedDesign package level (showing the module within
+  its SW component and its connections to sibling modules) and one inside the module package (showing
+  only the module's own ports). Indicate which IBD each proposed port belongs to.
 
 Respond ONLY with valid JSON:
 {{
   "ports": [
-    {{"name": "<prefix>_NewIntfPrt", "provided": ["<prefix>_NewIntf"], "required": []}}
+    {{
+      "name": "rb_<moduleShortName>_<PortName>Prt",
+      "provided": ["rb_<moduleShortName>_<InterfaceName>Intf"],
+      "required": [],
+      "ibd_level": "dd_package"
+    }}
   ],
   "links": []
 }}
 """
 
 OP_AD_PROMPT = """\
-You are a software architect. Generate a detailed DESIGN-LEVEL Activity Diagram
-for the following operation.
+You are a SysML architect generating an AB12 Operation Activity Diagram (AB12-Design perspective in Rhapsody).
+This is the DESIGN level — one activity diagram per operation, showing HOW the operation behaves.
+It is distinct from the Analysis Activity Diagram; the analysis AD is provided only as context.
 
 # Operation
 Name        : {op_name}
@@ -235,14 +251,19 @@ Return type : {return_type}
 Rationale   : {rationale}
 Requirements: {req_ids}
 
-# Abstract AD context
+# Analysis Activity Diagram (context only — shows the analysis actions this operation implements)
 {updated_ad}
 
 Rules:
 - Use ([Start]) and ([End]) for start/end nodes
 - Use {{condition?}} for decision nodes
 - Use ((merge)) for merge nodes after branches
-- Steps should be concrete but not C-code — design level
+- Every action MUST have stereotype <<design>>
+- Use between 1 and 3 design actions — enough to show the main idea of the implementation
+  (more than 5 requires strong justification)
+- Design actions are ABSTRACT — show design intent, not C-code detail
+- Do NOT use fork/join nodes (ordering must be fully defined at design level)
+- Do NOT use Call Operations or Call Behaviours as the primary mechanism
 - Return ONLY the Mermaid flowchart
 
 flowchart TD
