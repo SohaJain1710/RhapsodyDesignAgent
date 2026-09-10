@@ -13,9 +13,11 @@ Full pipeline:
   ingest → classify_prompt → llm → classify_parse → group
          → pick_usecase → read_context
          → update_ad_prompt → llm → update_ad_parse
+         → human_review_ad   ◄── HITL #1: approve/correct Analysis AD
          → design_elements_prompt → llm → design_elements_parse
          → design_ibd_prompt → llm → design_ibd_parse
-         → human_review → apply
+         → human_review      ◄── HITL #2: approve full design (ops/intfs/IBD)
+         → apply
          → fan_out_ad → [op_ad_prompt → llm → op_ad_parse → apply_op_ad]
          → next_usecase → (loop or END)
 """
@@ -815,7 +817,49 @@ def design_ibd_parse_node(state: DesignState) -> dict:
     return {"ibd_delta": result}
 
 
-# ── Human Review ──────────────────────────────────────────────────────────────
+# ── Human Review — Analysis AD ───────────────────────────────────────────────
+
+def human_review_ad_node(state: DesignState) -> dict:
+    """Pause after the Analysis AD update so the human can approve or correct it
+    before the pipeline continues to design operations, interfaces, and IBD."""
+    print(f"\n[HumanReviewAD] Use case: {state['current_usecase']}")
+    print(f"  Updated AD length: {len(state.get('updated_ad',''))}")
+
+    feedback = interrupt({
+        "phase"      : "ad_review",
+        "component"  : state["component_name"],
+        "usecase"    : state["current_usecase"],
+        "updated_ad" : state.get("updated_ad", ""),
+        "req_map"    : state.get("existing_req_map", {}),
+        "message"    : (
+            "Review the updated Analysis Activity Diagram. "
+            "Reply 'approve' to continue, or provide corrected Mermaid text."
+        ),
+    })
+
+    if isinstance(feedback, str):
+        approved = feedback.strip().lower() in ("approve", "apply", "yes", "ok")
+        corrected_ad = "" if approved else feedback.strip()
+    elif isinstance(feedback, dict):
+        approved = feedback.get("approved", False)
+        corrected_ad = feedback.get("updated_ad", "")
+    else:
+        approved = False
+        corrected_ad = ""
+
+    result: dict = {"approved": approved}
+    if corrected_ad:
+        result["updated_ad"] = corrected_ad
+    return result
+
+
+def route_after_ad_review(state: DesignState) -> str:
+    if state.get("approved"):
+        return "design_elements_prompt_node"
+    return "update_ad_prompt_node"   # re-run AD generation with implicit feedback
+
+
+# ── Human Review — Full Design ────────────────────────────────────────────────
 
 def human_review_node(state: DesignState) -> dict:
     print(f"\n[HumanReview] Use case: {state['current_usecase']}")
@@ -1155,6 +1199,7 @@ def build_graph():
     g.add_node("update_ad_prompt_node",      update_ad_prompt_node)
     g.add_node("update_ad_llm_node",         llm_node)
     g.add_node("update_ad_parse_node",       update_ad_parse_node)
+    g.add_node("human_review_ad_node",       human_review_ad_node)
 
     # Phase 2b
     g.add_node("design_elements_prompt_node",design_elements_prompt_node)
@@ -1199,7 +1244,11 @@ def build_graph():
     # Phase 2a
     g.add_edge("update_ad_prompt_node",      "update_ad_llm_node")
     g.add_edge("update_ad_llm_node",         "update_ad_parse_node")
-    g.add_edge("update_ad_parse_node",       "design_elements_prompt_node")
+    g.add_edge("update_ad_parse_node",       "human_review_ad_node")
+    g.add_conditional_edges("human_review_ad_node", route_after_ad_review, {
+        "design_elements_prompt_node": "design_elements_prompt_node",
+        "update_ad_prompt_node"      : "update_ad_prompt_node",
+    })
 
     # Phase 2b
     g.add_edge("design_elements_prompt_node","design_elements_llm_node")
