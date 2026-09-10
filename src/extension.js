@@ -207,6 +207,18 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
         const comp = data.component || component;
         pendingSession = { stream, token, component: comp };
 
+        // ── AD-only review checkpoint (after update_ad_parse, before design elements) ──
+        if (data.phase === 'ad_review') {
+            stream.markdown(`\n---\n## 🔄 Analysis AD Review — ${data.usecase || comp}`);
+            stream.markdown('\nThe Analysis Activity Diagram has been updated based on the requirements. Please review it before the pipeline designs operations, interfaces, and IBD.\n');
+            if (data.updated_ad && data.updated_ad.trim()) {
+                stream.markdown('### Updated Analysis Activity Diagram\n```mermaid\n' + data.updated_ad + '\n```');
+            }
+            stream.markdown('\n---\n**Approve the AD to continue, or type a correction and reply `apply <component> <corrected mermaid>`.**');
+            stream.button({ command: 'rhapsody.design.apply', title: '✅ Approve AD & Continue', arguments: [comp] });
+            return;
+        }
+
         stream.markdown(`\n---\n## ⏸️ Design Review — ${data.usecase || comp}`);
 
         // Requirements considered
