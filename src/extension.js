@@ -491,7 +491,12 @@ h2  { font-size: 13px; margin: 16px 0 8px; color: #4fc1ff; text-transform: upper
 .arg-list { margin-top: 5px; display: flex; flex-direction: column; gap: 3px; }
 .arg-row { display: flex; gap: 6px; align-items: center; font-size: 11px; color: #888; }
 .arg-row input { width: 130px; }
-.mermaid-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.tabs { display: flex; gap: 0; border-bottom: 2px solid #3c3c3c; margin-bottom: 12px; }
+.tab-btn { padding: 7px 18px; background: none; border: none; color: #888; font-size: 12px; font-weight: bold; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; border-radius: 4px 4px 0 0; }
+.tab-btn.active { color: #4fc1ff; border-bottom-color: #4fc1ff; background: #1e1e1e; }
+.tab-btn:hover:not(.active) { color: #d4d4d4; background: #2a2a2a; }
+.tab-panel { display: none; }
+.tab-panel.active { display: flex; flex-direction: column; gap: 6px; }
 .med { display: flex; flex-direction: column; gap: 6px; }
 .med label { font-size: 12px; font-weight: bold; color: #4fc1ff; }
 .med textarea { width: 100%; height: 200px; resize: vertical;
@@ -521,6 +526,7 @@ const comp = '${comp}';
 
 let S = {
     updated_ad     : RAW.updated_ad || '',
+    static_view    : RAW.static_view || '',
     op_ads         : {},
     new_operations : RAW.new_operations.map(o => ({ ...o, _sel: true })),
     new_interfaces : RAW.new_interfaces.map(i => ({ ...i, _sel: true })),
@@ -635,9 +641,74 @@ function render() {
         app.appendChild(ibdDiv);
     }
 
-    // Mermaid editors
+    // Diagram sections (3 tabs)
     const mDiv = el('div', 'section');
-    mDiv.appendChild(el('h2', '', '📊 Activity Diagrams'));
+    mDiv.appendChild(el('h2', '', '📊 Diagrams'));
+
+    // Tab bar
+    const tabs = el('div', 'tabs');
+    const tabDefs = [
+        { id: 'static',   label: '🏗️ Static View' },
+        { id: 'analysis', label: '🔄 Analysis View' },
+        { id: 'dynamic',  label: '⚡ Dynamic View' },
+    ];
+    let activeTab = 'static';
+    const tabBtns = {};
+    const tabPanels = {};
+    tabDefs.forEach(t => {
+        const btn = el('button', 'tab-btn' + (t.id === activeTab ? ' active' : ''), t.label);
+        btn.onclick = () => {
+            activeTab = t.id;
+            tabDefs.forEach(tt => {
+                tabBtns[tt.id].className = 'tab-btn' + (tt.id === activeTab ? ' active' : '');
+                tabPanels[tt.id].className = 'tab-panel' + (tt.id === activeTab ? ' active' : '');
+            });
+            if (activeTab === 'static')   renderMermaid('static-preview',   document.getElementById('static-ta').value);
+            if (activeTab === 'analysis') renderMermaid('analysis-preview', document.getElementById('analysis-ta').value);
+            if (activeTab === 'dynamic')  renderMermaid('dynamic-preview',  document.getElementById('dynamic-ta').value);
+        };
+        tabBtns[t.id] = btn;
+        tabs.appendChild(btn);
+    });
+    mDiv.appendChild(tabs);
+
+    // ── Static View panel ─────────────────────────────────────────────────
+    const staticPanel = el('div', 'tab-panel active');
+    staticPanel.id = 'tab-static';
+    const staticEd = el('div', 'med');
+    staticEd.appendChild(el('label', '', 'Class / Block definition diagram (edit Mermaid below)'));
+    const staticTa = document.createElement('textarea'); staticTa.id = 'static-ta';
+    staticTa.value = S.static_view || 'classDiagram\\n    class ' + comp + ' {\\n        +operation()\\n    }';
+    staticTa.oninput = () => { S.static_view = staticTa.value; };
+    staticEd.appendChild(staticTa);
+    const staticRef = el('button', 'btn-ref', '↻ Preview');
+    staticRef.onclick = () => renderMermaid('static-preview', staticTa.value);
+    staticEd.appendChild(staticRef);
+    const staticPrev = el('div', 'preview'); staticPrev.id = 'static-preview';
+    staticEd.appendChild(staticPrev);
+    staticPanel.appendChild(staticEd);
+    tabPanels['static'] = staticPanel;
+    mDiv.appendChild(staticPanel);
+
+    // ── Analysis View panel ───────────────────────────────────────────────
+    const analysisPanel = el('div', 'tab-panel');
+    analysisPanel.id = 'tab-analysis';
+    const anaEd = el('div', 'med');
+    anaEd.appendChild(el('label', '', 'Analysis Activity Diagram'));
+    const anaTa = document.createElement('textarea'); anaTa.id = 'analysis-ta'; anaTa.value = S.updated_ad;
+    anaTa.oninput = () => { S.updated_ad = anaTa.value; };
+    anaEd.appendChild(anaTa);
+    const anaRef = el('button', 'btn-ref', '↻ Preview'); anaRef.onclick = () => renderMermaid('analysis-preview', anaTa.value);
+    anaEd.appendChild(anaRef);
+    const anaPrev = el('div', 'preview'); anaPrev.id = 'analysis-preview';
+    anaEd.appendChild(anaPrev);
+    analysisPanel.appendChild(anaEd);
+    tabPanels['analysis'] = analysisPanel;
+    mDiv.appendChild(analysisPanel);
+
+    // ── Dynamic View panel ────────────────────────────────────────────────
+    const dynamicPanel = el('div', 'tab-panel');
+    dynamicPanel.id = 'tab-dynamic';
 
     // Op selector
     if (S.new_operations.length) {
@@ -646,41 +717,27 @@ function render() {
         const opNames = S.new_operations.map(o => o.name);
         opSel.appendChild(selEl(opNames, S.sel_op || opNames[0], v => {
             S.sel_op = v;
-            document.getElementById('op-ad-ta').value = S.op_ads[v] || defaultOpAD(S.new_operations.find(o => o.name === v));
-            renderMermaid('op-preview', document.getElementById('op-ad-ta').value);
+            document.getElementById('dynamic-op-ta').value = S.op_ads[v] || defaultOpAD(S.new_operations.find(o => o.name === v));
+            renderMermaid('dynamic-preview', document.getElementById('dynamic-op-ta').value);
         }));
-        mDiv.appendChild(opSel);
+        dynamicPanel.appendChild(opSel);
     }
 
-    const grid = el('div', 'mermaid-grid');
-
-    // Analysis AD editor
-    const anaEd = el('div', 'med');
-    anaEd.appendChild(el('label', '', '🔄 Analysis AD'));
-    const anaTa = document.createElement('textarea'); anaTa.value = S.updated_ad;
-    anaTa.oninput = () => { S.updated_ad = anaTa.value; renderMermaid('ana-preview', anaTa.value); };
-    anaEd.appendChild(anaTa);
-    const anaRef = el('button', 'btn-ref', '↻ Preview'); anaRef.onclick = () => renderMermaid('ana-preview', anaTa.value);
-    anaEd.appendChild(anaRef);
-    const anaPrev = el('div', 'preview'); anaPrev.id = 'ana-preview';
-    anaEd.appendChild(anaPrev);
-    grid.appendChild(anaEd);
-
-    // Operation AD editor
     const opEd = el('div', 'med');
-    opEd.appendChild(el('label', '', '⚙️ Operation AD'));
-    const opTa = document.createElement('textarea'); opTa.id = 'op-ad-ta';
+    opEd.appendChild(el('label', '', 'Operation Activity Diagram'));
+    const opTa = document.createElement('textarea'); opTa.id = 'dynamic-op-ta';
     const curOp = S.new_operations.find(o => o.name === S.sel_op) || S.new_operations[0];
     opTa.value = S.sel_op ? (S.op_ads[S.sel_op] || defaultOpAD(curOp)) : 'flowchart TD\\n    Start([Start]) --> End([End])';
-    opTa.oninput = () => { if (S.sel_op) S.op_ads[S.sel_op] = opTa.value; renderMermaid('op-preview', opTa.value); };
+    opTa.oninput = () => { if (S.sel_op) S.op_ads[S.sel_op] = opTa.value; };
     opEd.appendChild(opTa);
-    const opRef = el('button', 'btn-ref', '↻ Preview'); opRef.onclick = () => renderMermaid('op-preview', opTa.value);
+    const opRef = el('button', 'btn-ref', '↻ Preview'); opRef.onclick = () => renderMermaid('dynamic-preview', opTa.value);
     opEd.appendChild(opRef);
-    const opPrev = el('div', 'preview'); opPrev.id = 'op-preview';
+    const opPrev = el('div', 'preview'); opPrev.id = 'dynamic-preview';
     opEd.appendChild(opPrev);
-    grid.appendChild(opEd);
+    dynamicPanel.appendChild(opEd);
+    tabPanels['dynamic'] = dynamicPanel;
+    mDiv.appendChild(dynamicPanel);
 
-    mDiv.appendChild(grid);
     app.appendChild(mDiv);
 
     // Buttons
@@ -693,9 +750,8 @@ function render() {
     btnRow.appendChild(applyBtn);
     app.appendChild(btnRow);
 
-    // Auto-preview
-    setTimeout(() => renderMermaid('ana-preview', S.updated_ad), 100);
-    if (S.sel_op) setTimeout(() => renderMermaid('op-preview', opTa.value), 150);
+    // Auto-preview active tab
+    setTimeout(() => renderMermaid('static-preview', staticTa.value), 100);
 }
 
 function defaultOpAD(op) {
@@ -719,6 +775,7 @@ function applyChanges() {
         component      : comp,
         usecase        : RAW.usecase,
         updated_ad     : S.updated_ad,
+        static_view    : S.static_view,
         req_map        : RAW.req_map || {},
         op_ads         : S.op_ads,
         new_operations : S.new_operations.filter(o => o._sel).map(o => { const {_sel,...r}=o; return r; }),
