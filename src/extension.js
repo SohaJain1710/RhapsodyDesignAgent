@@ -803,6 +803,8 @@ render();
 </script>
 </body>
 </html>`;
+}
+
 async function handleRhapsodyChat(request, context, stream, token) {
     const commandName = request.command || '';
     outputChannel && outputChannel.appendLine('[debug] command=' + commandName + ' prompt=' + request.prompt.substring(0, 50));
