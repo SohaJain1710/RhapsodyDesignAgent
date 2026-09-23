@@ -25,8 +25,8 @@
         "title": "Rhapsody: Apply Design Changes"
       },
       {
-        "command": "rhapsody.design.feedback",
-        "title": "Rhapsody: Provide Design Feedback"
+        "command": "rhapsody.design.review",
+        "title": "Rhapsody: Open Design Review Editor"
       }
     ],
     "chatParticipants": [
@@ -55,7 +55,7 @@
   "scripts": {
     "test": "echo no test"
   },
-  "author": "",
+  "author": "JIO2KOR",
   "license": "ISC",
   "repository": {
     "type": "git",
