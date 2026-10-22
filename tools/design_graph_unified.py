@@ -136,13 +136,19 @@ This is the ANALYSIS level — it models WHAT the component must do (the problem
 {req_links}
 
 Rules:
-- If ALL requirements are already formally linked (all appear in "Requirements Already Covered") → reply exactly: NO_CHANGE
-- If existing actions semantically cover the requirements but the links are missing or incomplete,
-  return the flowchart UNCHANGED followed by the full requirements mapping for ALL actions
-  (existing and new). Do NOT add new actions when existing ones already cover the requirements.
+- Reply exactly NO_CHANGE only when all requirements are formally linked AND every visible node label is a meaningful description.
+- Labels such as A1, A2, A3, D1, Action1, or node IDs are placeholders, not meaningful descriptions; replace them using the requirements and use-case context.
+- Preserve existing node IDs and transition structure when they already express the required behavior, but update placeholder labels even when adding no nodes.
+- If existing actions semantically cover the requirements but links are missing or labels are placeholders, return the existing flowchart structure with descriptive labels followed by the full requirements mapping for ALL actions.
+- Do NOT add new actions when existing actions already cover the requirements; clarify their visible labels instead.
 - Only ADD new abstract actions/decisions when a requirement cannot be covered by any existing action
-- Keep all existing actions unchanged
+- Keep meaningful existing action labels unchanged.
+- Action labels MUST state the business-level action in plain language; do not expose short codes or opaque IDs as visible text.
+- Put every decision question in an action box using action_X["Descriptive question?<br><<analysis>>"]. Connect that action to decision_X{{"decision"}}; the decision diamond's visible label must be exactly "decision" with no question text or stereotype.
+- Every decision diamond must have exactly one incoming transition, from its question action. Route guarded outgoing transitions (for example, -->|Yes| and -->|No|) from the decision diamond. When branches converge before a decision, route them to the question action, not directly to the decision. Do not use a merge_X node for this convergence.
+- When updating an existing diagram, move any question currently shown inside a decision diamond into a preceding descriptive action box, relabel the diamond exactly "decision", and connect the action to the diamond. Preserve the existing branch meaning and guards.
 - Every new action MUST have stereotype <<analysis>>
+- Always declare the end node as activity_final([⏹ end]) and connect every terminal path to it.
 - Actions describe business-level steps — no implementation vocabulary, no C-code concepts
 - MAX ~7 elements per diagram level; group more than that into a named subactivity
 - Forbidden in analysis perspective: Call Operations, Activity Parameters, Swimlanes
@@ -261,19 +267,34 @@ Requirements: {req_ids}
 {updated_ad}
 
 Rules:
-- Use ([Start]) and ([End]) for start/end nodes
-- Use {{condition?}} for decision nodes
-- Use ((merge)) for merge nodes after branches
-- Every action MUST have stereotype <<design>>
-- Use between 1 and 3 design actions — enough to show the main idea of the implementation
-  (more than 5 requires strong justification)
-- Design actions are ABSTRACT — show design intent, not C-code detail
-- Do NOT use fork/join nodes (ordering must be fully defined at design level)
-- Do NOT use Call Operations or Call Behaviours as the primary mechanism
-- Edge labels MUST NOT use square brackets: write -->|Yes| or -->|Condition met|, NEVER -->|[Yes]|
-- Return ONLY the Mermaid flowchart
+- Ignore the operation logic and focus only on producing Mermaid with the exact syntax below.
+- The first line MUST be exactly: graph TD
+- Declare the start node as: initial([▶ start])
+- Declare the end node as: activityfinal_1([⏹ end])
+- Declare each action with a sequential ID and this exact shape: action_0["Action name<br><<design>>"]
+- Declare decisions with this shape: decision_0{"Condition?<br><<design>>"}
+- Declare merge nodes with this shape: merge_0((merge))
+- Use valid Mermaid identifiers containing only letters, digits, and underscores; do not put spaces in IDs.
+- Use <br> between the node name and its stereotype; do not use raw newlines inside node declarations.
+- Every action label MUST end with <br><<design>>. Do not use <<analysis>>.
+- Connect declared nodes using Mermaid arrows. Edge labels MUST NOT contain square brackets; use -->|Yes| or -->|Condition met|.
+- Do NOT use fork/join nodes, Call Operations, or Call Behaviours.
+- Return ONLY the Mermaid flowchart, with no Markdown fences or explanatory text.
 
-flowchart TD
+Required syntax example (illustrative names and connections only):
+graph TD
+        initial([▶ start])
+        action_0["Prepare design information<br><<design>>"]
+        decision_0{"Condition?<br><<design>>"}
+        action_1["Select design response<br><<design>>"]
+        merge_0((merge))
+        activityfinal_1([⏹ end])
+        initial --> action_0
+        action_0 --> decision_0
+        decision_0 -->|Yes| action_1
+        decision_0 -->|No| merge_0
+        action_1 --> merge_0
+        merge_0 --> activityfinal_1
 """
 
 
@@ -1329,7 +1350,7 @@ if __name__ == "__main__":
             # Try streaming first to see if graph has pending interrupt
             nodes_run = []
             result = None
-            for chunk in graph.stream(Command(resume=resume_val), config, stream_mode="updates"):
+            for chunk in graph.stream(Command(resume=resume_val, update=initial_state), config, stream_mode="updates"):
                 for node_name, node_data in chunk.items():
                     print(f"[Resume] Node: {node_name}", file=sys.stderr)
                     nodes_run.append(node_name)

@@ -377,22 +377,39 @@ def create_activity_diagram(dd_pkg, diagram_name: str, plan: dict,
         name = _re.sub(r"[^\w]", "_", name)
         return name.strip("_") or "Action"
 
+    used_state_names = set()
+
     for action in plan.get("actions", []):
         a_id   = action["id"]
         a_name = sanitize(action.get("name", a_id))
         a_type = action.get("type", "action")
         try:
             if a_type == "decision":
+                a_name = sanitize(a_id)
                 elem = ad.addNewAggr("Condition", a_name)
             elif a_type in ("merge", "fork", "join"):
                 elem = ad.addNewAggr("JunctionConnector", a_name)
             else:
-                # Standard action node — use action_N naming
-                rhapsody_name = f"action_{action_count}"
+                # Keep Mermaid IDs for graph wiring. Name Rhapsody states from their labels.
+				#TODO: simplify the regex logic
+                import re as _re
+                entry_text = action.get("text", "").strip() or a_name
+                entry_text = _re.sub(r"<br\s*/?>", "\n", entry_text,
+                                     flags=_re.IGNORECASE)
+                entry_text = _re.sub(r"<<\s*(?:design|analysis)\s*>>", "",
+                                     entry_text, flags=_re.IGNORECASE)
+                entry_text = _re.sub(r"<[^>]*>", "", entry_text).strip()
+                base_name = sanitize(entry_text.splitlines()[0])[:64].strip("_")
+                base_name = base_name or f"Action_{action_count}"
+                rhapsody_name = base_name
+                suffix = 2
+                while rhapsody_name in used_state_names:
+                    rhapsody_name = f"{base_name[:58]}_{suffix}"
+                    suffix += 1
+                used_state_names.add(rhapsody_name)
                 action_count += 1
                 elem = root.addState(rhapsody_name)
-                # Set entry action text (the description shown in diagram)
-                entry_text = action.get("text", "").strip() or a_name
+                # Assign plain action text without Mermaid markup.
                 try:
                     elem.entryAction = entry_text
                 except:
@@ -477,7 +494,7 @@ def create_activity_diagram(dd_pkg, diagram_name: str, plan: dict,
         from_elem = node_map.get(from_id)
         to_elem   = node_map.get(to_id)
 
-        if not from_elem or not to_elem:
+        if from_elem is None or to_elem is None:
             errors.append(f"Transition {from_id}->{to_id}: element missing")
             continue
 
@@ -541,7 +558,7 @@ def create_activity_diagram(dd_pkg, diagram_name: str, plan: dict,
         a_id  = action["id"]
         reqs  = action.get("requirements", [])
         elem  = node_map.get(a_id)
-        if not elem or elem is True or not reqs or not project:
+        if elem is None or elem is True or not reqs or not project:
             continue
         for req_id in reqs:
             try:
@@ -744,6 +761,8 @@ def create_or_update_ad(component_name: str, usecase: str,
         if rhapsody is None:
             rhapsody = win32com.client.GetActiveObject("Rhapsody2.Application")
         project  = rhapsody.activeProject()
+        from project_config import get_conventions
+        conventions = get_conventions(project.name if project else "")
 
         from rhapsody_com import get_sw_model
         sw       = get_sw_model(project) or project
@@ -774,6 +793,7 @@ def create_or_update_ad(component_name: str, usecase: str,
         # Parse Mermaid to plan, injecting the requirement mapping into each action
         plan = from_mermaid(mermaid, requirements_map=req_map or {})
         plan["diagram_name"] = diag_name
+        plan["component_name"] = component_name
 
         if existing:
             # Delete existing diagram and recreate
@@ -783,7 +803,8 @@ def create_or_update_ad(component_name: str, usecase: str,
             except Exception as e:
                 print(f"[ADUpdate] Could not delete existing AD: {e}", file=sys.stderr)
 
-        result = create_activity_diagram(dd_pkg, diag_name, plan, rhapsody)
+        result = create_activity_diagram(dd_pkg, diag_name, plan, rhapsody,
+                         conventions=conventions)
         project.save()
         return result
 
