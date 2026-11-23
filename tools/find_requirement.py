@@ -47,118 +47,81 @@ def get_rhapsody():
     return rhapsody, project
 
 
-def find_requirement_in_ab12requirements(project, requirement_id, component_name=None):
-    """
-    Searches AB12Requirements::SRS::SRS_SDM_<Component>::... for the
-    requirement by exact name match. If component_name is given, scopes
-    the search to that component's subtree first (faster); falls back to
-    a full AB12Requirements search if not found there.
-    """
-    ab12req = None
+_req_index_cache: dict = {}
+
+
+def _requirement_index(project, component_name):
+    """{requirement name: element} over ALL SRS packages of the component
+    (every requirements package, every matching SRS sub-package), built once."""
+    from read_all_requirements import find_srs_packages
     try:
-        for i in range(1, project.packages.Count + 1):
-            pkg = project.packages.Item(i)
-            if pkg.name == "AB12Requirements":
-                ab12req = pkg
-                break
-    except Exception as e:
-        print(f"[FindRequirement] Could not access AB12Requirements: {e}", file=sys.stderr)
-        return None
-
-    if not ab12req:
-        print("[FindRequirement] AB12Requirements package not found", file=sys.stderr)
-        return None
-
-    def search(pkg, depth=0):
-        """Requirement elements aren't stored in .classes — use the generic
-        nested-elements traversal and filter by metaclass + name."""
+        key = (str(project.GUID), component_name)
+    except Exception:
+        key = (id(project), component_name)
+    if key in _req_index_cache:
+        return _req_index_cache[key]
+    index = {}
+    for pkg, label in find_srs_packages(project, component_name):
         try:
             nested = pkg.getNestedElementsRecursive()
             for i in range(1, nested.Count + 1):
                 e = nested.Item(i)
                 try:
-                    if e.metaclass == "Requirement" and e.name == requirement_id:
-                        return e
-                except:
+                    mc = getattr(e, "metaClass", None) or getattr(e, "metaclass", None)
+                    if mc == "Requirement" and e.name not in index:
+                        index[e.name] = e
+                except Exception:
                     pass
         except Exception as ex:
-            print(f"[FindRequirement] getNestedElementsRecursive failed on "
-                  f"{pkg.name}: {ex}", file=sys.stderr)
-        return None
+            print(f"[FindRequirement] getNestedElementsRecursive failed on {label}: {ex}",
+                  file=sys.stderr)
+    _req_index_cache[key] = index
+    return index
 
-    # Scope to the component's SRS subtree — this is fast (confirmed ~0.01s
-    # even on 1290 nested elements) and sufficient for all known cases.
-    # Deliberately NOT falling back to a full AB12Requirements scan (which
-    # also covers SYDS/SYRS/ARS/CRS, four more comparably-sized trees) —
-    # that fallback was the actual source of multi-second-plus hangs.
+
+def find_requirement_in_ab12requirements(project, requirement_id, component_name=None):
+    """
+    Find a requirement by exact name in the component's SRS packages — ALL of
+    them (any requirements package with an SRS tree, every matching SRS
+    sub-package), not only the first one / only 'AB12Requirements'.
+    Scoped to the component (a full scan of every requirements tree is slow).
+    """
     if not component_name:
         print("[FindRequirement] No component given — cannot scope search; "
               "pass --component to locate the requirement", file=sys.stderr)
         return None
-
-    try:
-        srs_pkg = None
-        # SRS folders are named "SRS_SDM_SafeDataMgt" style — using the
-        # component's SHORT name (the part after the second underscore,
-        # e.g. "rb_sdm_SafeDataMgt" -> "SafeDataMgt"), not the full
-        # component package name, which never appears in the SRS folder name.
-        parts = component_name.split("_")
-        short_name = parts[2] if len(parts) >= 3 else (parts[-1] if parts else component_name)
-
-        for i in range(1, ab12req.packages.Count + 1):
-            sub = ab12req.packages.Item(i)
-            if sub.name == "SRS":
-                for j in range(1, sub.packages.Count + 1):
-                    comp_srs = sub.packages.Item(j)
-                    if short_name.lower() in comp_srs.name.lower():
-                        srs_pkg = comp_srs
-                        break
-            if srs_pkg:
-                break
-        if not srs_pkg:
-            print(f"[FindRequirement] No SRS subtree found matching "
-                  f"'{short_name}' (derived from '{component_name}') "
-                  f"under AB12Requirements::SRS", file=sys.stderr)
-            return None
-        return search(srs_pkg)
-    except Exception as e:
-        print(f"[FindRequirement] Scoped search failed: {e}", file=sys.stderr)
-        return None
+    elem = _requirement_index(project, component_name).get(requirement_id)
+    if elem is None:
+        print(f"[FindRequirement] {requirement_id} not found in the SRS packages of "
+              f"{component_name}", file=sys.stderr)
+    return elem
 
 
 def find_linked_use_cases(comp_pkg, requirement_element):
     """
-    Searches the component's ReqLinking UseCaseDiagram for a Dependency
-    whose dependsOn matches this requirement, returning the use case
-    name(s) it's linked to.
+    Searches ALL of the component's 'ReqLinking' use case diagrams for a
+    Dependency whose dependsOn matches this requirement, returning the use case
+    name(s) it is linked to (previously only the first such diagram was read).
     """
     linked = []
-    ucd = None
     try:
-        for i in range(1, comp_pkg.useCaseDiagrams.Count + 1):
-            d = comp_pkg.useCaseDiagrams.Item(i)
-            if "ReqLinking" in d.name:
-                ucd = d
-                break
-    except:
-        pass
-
-    if not ucd:
-        return linked
-
-    try:
-        elems = ucd.getElementsInDiagram()
-        for j in range(1, elems.Count + 1):
-            e = elems.Item(j)
-            try:
-                if e.metaclass == "Dependency":
-                    if e.dependsOn.name == requirement_element.name:
-                        linked.append(e.dependent.name)
-            except:
-                pass
-    except Exception as ex:
-        print(f"[FindRequirement] ReqLinking scan failed: {ex}", file=sys.stderr)
-
+        ucds = [comp_pkg.useCaseDiagrams.Item(i) for i in range(1, comp_pkg.useCaseDiagrams.Count + 1)]
+    except Exception:
+        ucds = []
+    for ucd in (d for d in ucds if "ReqLinking" in d.name):
+        try:
+            elems = ucd.getElementsInDiagram()
+            for j in range(1, elems.Count + 1):
+                e = elems.Item(j)
+                try:
+                    mc = getattr(e, "metaClass", None) or getattr(e, "metaclass", None)
+                    if mc == "Dependency" and e.dependsOn.name == requirement_element.name:
+                        if e.dependent.name not in linked:
+                            linked.append(e.dependent.name)
+                except Exception:
+                    pass
+        except Exception as ex:
+            print(f"[FindRequirement] ReqLinking scan failed on {ucd.name}: {ex}", file=sys.stderr)
     return linked
 
 
@@ -207,7 +170,7 @@ if __name__ == "__main__":
     req_elem = find_requirement_in_ab12requirements(
         project, args.requirement, component_name=args.component)
 
-    if not req_elem:
+    if req_elem is None:
         result = {"requirement_id": args.requirement, "found": False}
     else:
         try:

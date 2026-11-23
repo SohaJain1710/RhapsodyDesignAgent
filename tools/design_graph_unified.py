@@ -429,8 +429,7 @@ def ingest_node(state: DesignState) -> dict:
     try:
         import win32com.client
         from read_usecases import find_package_recursive, collect_usecases
-        from read_all_requirements import (get_rhapsody, find_srs_package,
-                                           collect_requirements_recursive)
+        from read_all_requirements import get_rhapsody, collect_all_requirements
 
         _, project = get_rhapsody()
 
@@ -497,10 +496,10 @@ def ingest_node(state: DesignState) -> dict:
 
         else:
             # Default: read from Rhapsody SRS package
-            srs_pkg, srs_name = find_srs_package(project, component_name)
-            if srs_pkg:
-                collect_requirements_recursive(srs_pkg, requirements)
-                print(f"[Ingest] Rhapsody requirements: {len(requirements)} from {srs_name}")
+            requirements, srs_names = collect_all_requirements(project, component_name)
+            if srs_names:
+                print(f"[Ingest] Rhapsody requirements: {len(requirements)} from {srs_names}")
+                log.step("ingest", f"Requirements read from: {', '.join(srs_names)}")
             else:
                 print("[Ingest] WARNING: SRS package not found")
 

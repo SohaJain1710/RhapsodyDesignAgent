@@ -261,15 +261,11 @@ def set_guard(tr, guard: str):
 
 def _get_find_requirement():
     """Lazy import find_requirement_in_ab12requirements from find_requirement.py."""
-    import importlib.util
-    import os
-    spec = importlib.util.spec_from_file_location(
-        "find_requirement",
-        os.path.join(os.path.dirname(__file__), "find_requirement.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.find_requirement_in_ab12requirements
+    # normal import: the module keeps its per-run requirement index cache
+    import os, sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from find_requirement import find_requirement_in_ab12requirements
+    return find_requirement_in_ab12requirements
 
 
 def find_requirement(project, req_id, component_name=None):
@@ -565,7 +561,7 @@ def create_activity_diagram(dd_pkg, diagram_name: str, plan: dict,
             try:
                 req = find_requirement(project, req_id,
                                       component_name=plan.get("component_name"))
-                if req:
+                if req is not None:
                     dep = elem.addDependencyTo(req)
                     try:
                         dep.addStereotype("satisfy", "")

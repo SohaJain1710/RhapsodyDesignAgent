@@ -170,48 +170,83 @@ def collect_requirements_recursive(pkg, results, filter_state=None, depth=0, max
               f"{pkg.name}: {ex}", file=sys.stderr)
 
 
-def find_srs_package(project, component_name):
-    """
-    Find <RequirementsPackage>::SRS::SRS_<Component> package.
-    Searches all top-level packages for one containing an SRS subtree.
-    Works with any naming convention (AB12Requirements, CustRequirements, etc.)
-    """
-    # Search all top-level packages for one containing an SRS sub-package
-    req_pkg_candidates = []
+def _component_short_name(component_name: str) -> str:
+    # "rb_sdm_SafeDataMgt" -> "SafeDataMgt" (SRS folders are named SRS_SDM_SafeDataMgt)
+    parts = component_name.split("_")
+    return parts[2] if len(parts) >= 3 else (parts[-1] if parts else component_name)
+
+
+def find_srs_packages(project, component_name):
+    """ALL SRS sub-packages of a component, in EVERY top-level package that has
+    an 'SRS' package (AB12Requirements, AB12Requirements_v2, CustRequirements, ...).
+
+    Returns [(package, "Top::SRS::Sub"), ...] — previously only the first
+    requirements package and the first matching sub-package were searched."""
+    short = _component_short_name(component_name).lower()
+    found, seen = [], set()
     try:
-        for i in range(1, project.packages.Count + 1):
-            pkg = project.packages.Item(i)
-            try:
-                for j in range(1, pkg.packages.Count + 1):
-                    sub = pkg.packages.Item(j)
-                    if sub.name == "SRS":
-                        req_pkg_candidates.append((pkg, sub))
-            except: pass
+        tops = [project.packages.Item(i) for i in range(1, project.packages.Count + 1)]
     except Exception as e:
         print(f"[ReadAllReq] Cannot search packages: {e}", file=sys.stderr)
-        return None, None
+        return []
+    for top in tops:
+        try:
+            srs_list = [top.packages.Item(j) for j in range(1, top.packages.Count + 1)
+                        if top.packages.Item(j).name == "SRS"]
+        except Exception:
+            continue
+        for srs in srs_list:
+            try:
+                subs = [srs.packages.Item(k) for k in range(1, srs.packages.Count + 1)]
+            except Exception:
+                continue
+            for sub in subs:
+                try:
+                    if short not in sub.name.lower():
+                        continue
+                    key = str(sub.GUID) if getattr(sub, "GUID", None) else f"{top.name}::{sub.name}"
+                except Exception:
+                    key = f"{top.name}::{sub.name}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append((sub, f"{top.name}::SRS::{sub.name}"))
+    if not found:
+        print(f"[ReadAllReq] No SRS sub-package matching '{short}' in any requirements package",
+              file=sys.stderr)
+    else:
+        print(f"[ReadAllReq] SRS packages for {component_name}: {[l for _, l in found]}",
+              file=sys.stderr)
+    return found
 
-    if not req_pkg_candidates:
-        print("[ReadAllReq] No SRS package found under any top-level package", file=sys.stderr)
-        return None, None
 
-    ab12req, srs_pkg_parent = req_pkg_candidates[0]
-    print(f"[ReadAllReq] Found requirements under: {ab12req.name}::SRS", file=sys.stderr)
+def find_srs_package(project, component_name):
+    """Backward compatible: the first matching SRS package (prefer find_srs_packages)."""
+    pkgs = find_srs_packages(project, component_name)
+    return (pkgs[0][0], pkgs[0][1]) if pkgs else (None, None)
 
-    parts = component_name.split("_")
-    short_name = parts[2] if len(parts) >= 3 else (parts[-1] if parts else component_name)
 
-    try:
-        for j in range(1, srs_pkg_parent.packages.Count + 1):
-            comp_srs = srs_pkg_parent.packages.Item(j)
-            if short_name.lower() in comp_srs.name.lower():
-                return comp_srs, comp_srs.name
-    except Exception as e:
-        print(f"[ReadAllReq] SRS subtree search failed: {e}", file=sys.stderr)
-
-    print(f"[ReadAllReq] No SRS subtree found matching '{short_name}' "
-          f"under SRS package", file=sys.stderr)
-    return None, None
+def collect_all_requirements(project, component_name, filter_state=None):
+    """Requirements from ALL SRS packages of the component, de-duplicated.
+    Returns (requirements, [package labels])."""
+    pkgs = find_srs_packages(project, component_name)
+    reqs, by_guid, by_id = [], set(), {}
+    for pkg, label in pkgs:
+        part = []
+        collect_requirements_recursive(pkg, part, filter_state=filter_state)
+        for r in part:
+            if r.get("guid") and r["guid"] in by_guid:
+                continue            # same element reached twice
+            if r["id"] in by_id:
+                print(f"[ReadAllReq] Requirement {r['id']} exists in {by_id[r['id']]} and "
+                      f"{label} - keeping the first", file=sys.stderr)
+                continue
+            if r.get("guid"):
+                by_guid.add(r["guid"])
+            by_id[r["id"]] = label
+            r["srs_package"] = label
+            reqs.append(r)
+    return reqs, [l for _, l in pkgs]
 
 
 if __name__ == "__main__":
@@ -225,8 +260,10 @@ if __name__ == "__main__":
 
     _, project = get_rhapsody()
 
-    srs_pkg, srs_pkg_name = find_srs_package(project, args.component)
-    if not srs_pkg:
+    requirements, srs_names = collect_all_requirements(project, args.component,
+                                                       filter_state=args.state)
+    srs_pkg_name = ", ".join(srs_names)
+    if not srs_names:
         print(json.dumps({
             "component": args.component,
             "error": "SRS package not found",
@@ -235,10 +272,6 @@ if __name__ == "__main__":
         }))
         sys.exit(1)
 
-    print(f"[ReadAllReq] Scanning {srs_pkg_name}...", file=sys.stderr)
-
-    requirements = []
-    collect_requirements_recursive(srs_pkg, requirements, filter_state=args.state)
 
     print(f"[ReadAllReq] Found {len(requirements)} requirement(s)", file=sys.stderr)
 
