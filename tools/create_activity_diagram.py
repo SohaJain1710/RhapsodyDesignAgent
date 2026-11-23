@@ -658,6 +658,9 @@ def create_activity_diagram(dd_pkg, diagram_name: str, plan: dict,
         "diagram_name"     : diagram_name,
         "nodes"            : len(node_map),
         "drawn"            : len(ge_map),
+        # plan action id -> created Rhapsody element (used for trace links)
+        "elements"         : {k: v for k, v in node_map.items()
+                              if k not in ("initial", "final") and v is not True},
         "errors"           : errors,
         "manual_steps"     : [
             f"Set AllocatedToModule = {i['module']} on action {i['action']}"

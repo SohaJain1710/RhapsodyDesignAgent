@@ -399,8 +399,12 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
         if (Object.keys(opAds).length) {
             stream.markdown('\n### ⚡ Operation Activity Diagrams (' + Object.keys(opAds).length + ')' +
                 '\n> Edit them in **Review & Edit → Dynamic View** before applying.');
+            const opLinks = data.op_ad_links || {};
             Object.entries(opAds).forEach(([name, mm]) => {
-                stream.markdown('\n**`' + name + 'AD`**\n```mermaid\n' + mm + '\n```');
+                const l = opLinks[name] || {};
+                const traces = Object.entries(l).map(([a, ids]) => '`' + a + '` → ' + ids.join(', ')).join('; ');
+                stream.markdown('\n**`' + name + 'AD`**\n```mermaid\n' + mm + '\n```' +
+                    '\n- Traces to Analysis AD: ' + (traces || '_actions of the analysis action(s) this operation implements_'));
             });
         }
 
@@ -534,6 +538,7 @@ function openReviewWebview(context, data, comp, outputFile, stream, token) {
         warnings        : data.warnings || [],
         op_ads          : data.op_ads || {},
         ad_only_ops     : data.ad_only_ops || [],
+        op_ad_links     : data.op_ad_links || {},
         ibd_delta       : data.ibd_delta || { ports: [], links: [] },
     });
 
@@ -1205,6 +1210,7 @@ function applyChanges() {
         op_ads             : Object.fromEntries(Object.entries(S.op_ads).filter(([k]) =>
                                  S.op_ads_edited.has(k) || (RAW.op_ads || {})[k])),
         op_ads_edited      : Array.from(S.op_ads_edited),
+        op_ad_links        : RAW.op_ad_links || {},
         new_operations     : S.new_operations.filter(o => o._sel).map(strip),
         new_interfaces     : S.new_interfaces.filter(i => i._sel).map(strip),
         realizations       : RAW.realizations || [],

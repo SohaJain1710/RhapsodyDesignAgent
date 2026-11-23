@@ -79,6 +79,7 @@ class DesignState(TypedDict):
     module_members   : dict        # {module: {operations: [...], attributes: [...]}}
     interface_ops    : dict        # {existing interface: [operation dicts]}
     ad_only_ops      : list        # existing module ops (implementing an interface) without AD
+    op_ad_links      : dict        # {op: {design action id: [analysis action ids]}} from the LLM
     op_ads_replace   : list        # op names whose AD the reviewer edited (replace existing AD)
 
     # Shared LLM bus
@@ -338,6 +339,9 @@ Requirements: {req_ids}
 # Analysis Action(s) Implemented by this Operation
 {implements}
 
+# Actions of the Analysis Activity Diagram (id: text)
+{analysis_actions}
+
 # Existing Members of {module} (may be used / called by this operation)
 {members}
 
@@ -364,7 +368,14 @@ Syntax rules (exact):
   no raw newlines inside node declarations
 - Every action label MUST end with <br><<design>> (never <<analysis>>)
 - Do NOT use fork/join nodes, Call Operations or Call Behaviours
-- Return ONLY the Mermaid flowchart — no Markdown fences, no explanation
+- Return ONLY the Mermaid flowchart, then the analysis links block below —
+  no Markdown fences, no explanation
+
+Traceability (required): after the flowchart, add one line per design action (also
+question actions) naming the analysis action id(s) it refines, from the list above:
+Analysis links per action:
+action_0: <analysis action id>
+action_1: <analysis action id>, <analysis action id>
 
 Syntax example (illustrative only):
 graph TD
@@ -382,7 +393,81 @@ graph TD
     decision_0 -->|No| merge_0
     action_2 --> merge_0
     merge_0 --> activityfinal_1
+Analysis links per action:
+action_0: action_select
+action_1: action_eligible
+action_2: action_crc
 """
+
+
+_LINKS_HEADER = "analysis links per action"
+
+
+def _clean_label(text: str) -> str:
+    import re as _r
+    t = _r.sub(r"<br\s*/?>", " ", str(text or ""), flags=_r.I)
+    t = _r.sub(r"<<\s*(?:design|analysis)\s*>>", "", t, flags=_r.I)
+    t = _r.sub(r"<[^>]*>", "", t)
+    return " ".join(t.split()).strip().strip('"')
+
+
+def analysis_actions(updated_ad: str) -> list:
+    """[(id, text)] of the action boxes of the Analysis AD (no decisions/merges)."""
+    try:
+        from mermaid_to_ad import from_mermaid
+        plan = from_mermaid(updated_ad or "")
+        return [(a["id"], _clean_label(a.get("text") or a.get("name")))
+                for a in plan.get("actions", []) if a.get("type", "action") == "action"]
+    except Exception:
+        return []
+
+
+def split_op_ad(text: str):
+    """LLM output → (mermaid flowchart, {design action id: [analysis action ids]})."""
+    lines = (text or "").splitlines()
+    idx = next((i for i, l in enumerate(lines)
+                if l.strip().lower().rstrip(":").startswith(_LINKS_HEADER)), None)
+    if idx is None:
+        return text or "", {}
+    links = {}
+    for l in lines[idx + 1:]:
+        if ":" not in l or l.strip().startswith("```"):
+            continue
+        k, v = l.split(":", 1)
+        ids = [x.strip() for x in v.split(",") if x.strip()]
+        if k.strip() and ids:
+            links[k.strip()] = ids
+    return "\n".join(lines[:idx]), links
+
+
+def resolve_action_links(mermaid: str, explicit: dict, op_name: str, state: dict):
+    """{design action id: [analysis action TEXT]} for every action of the
+    Operation AD: the LLM's links, else the analysis action(s) the operation
+    implements (action_op_map). Returns (links, warnings)."""
+    from mermaid_to_ad import from_mermaid
+    acts = dict(analysis_actions(state.get("updated_ad", "")))
+    by_text = {_clean_label(t).lower(): t for t in acts.values()}
+    implemented = [by_text.get(_clean_label(a).lower(), _clean_label(a))
+                   for a, o in (state.get("action_op_map") or {}).items() if o == op_name]
+    out, warnings = {}, []
+    try:
+        design = [a["id"] for a in from_mermaid(mermaid).get("actions", [])
+                  if a.get("type", "action") == "action"]
+    except Exception:
+        design = []
+    for aid in design:
+        texts = []
+        for x in (explicit or {}).get(aid, []):
+            if x in acts:
+                texts.append(acts[x])
+            elif _clean_label(x).lower() in by_text:
+                texts.append(by_text[_clean_label(x).lower()])
+        texts = texts or implemented
+        if texts:
+            out[aid] = list(dict.fromkeys(texts))
+        else:
+            warnings.append(f"action {aid} has no analysis action to trace to")
+    return out, warnings
 
 
 def build_op_ad_prompt(op: dict, state: dict) -> str:
@@ -400,6 +485,8 @@ def build_op_ad_prompt(op: dict, state: dict) -> str:
         rationale   = op.get("rationale", ""),
         req_ids     = ", ".join(op.get("req_ids", []) or []),
         implements  = "\n".join(f"- {a}" for a in implements) or "(not mapped to a specific analysis action)",
+        analysis_actions = "\n".join(f"- {i}: {t}" for i, t in analysis_actions(state.get("updated_ad", "")))
+                           or "(none)",
         members     = "\n".join(member_lines) or "(none known)",
         updated_ad  = state.get("updated_ad", ""),
     )
@@ -677,6 +764,7 @@ def pick_usecase_node(state: DesignState) -> dict:
         "new_operations"   : [],
         "new_interfaces"   : [],
         "op_ads"           : {},
+        "op_ad_links"      : {},
         "ad_only_ops"      : [],
         "ad_feedback"      : "",
         "human_feedback"   : "",
@@ -1332,6 +1420,7 @@ def human_review_node(state: DesignState) -> dict:
         "warnings"      : state.get("design_warnings") or [],
         "op_ads"        : state.get("op_ads") or {},
         "ad_only_ops"   : state.get("ad_only_ops") or [],
+        "op_ad_links"   : state.get("op_ad_links") or {},
         "ibd_delta"     : state.get("ibd_delta", {}),
         "message"       : "Review the proposed design changes. Reply 'apply' to approve or provide feedback.",
     })
@@ -1363,6 +1452,7 @@ def human_review_node(state: DesignState) -> dict:
                 "op_ads_replace": [n for n in (edits.get("op_ads_edited") or [])
                                    if n in norm["op_ads"]],
                 "ad_only_ops"   : norm.get("ad_only_ops", []),
+                "op_ad_links"   : norm.get("op_ad_links", {}) or state.get("op_ad_links") or {},
             })
             if norm.get("updated_ad"):
                 result["updated_ad"] = _clean_mermaid_flowchart(norm["updated_ad"])
@@ -1473,18 +1563,20 @@ def op_ad_generate_node(state: DesignState) -> dict:
            if op.get("usecase", state["current_usecase"]) == state["current_usecase"]]
     if not ops:
         return {"op_ads": {}}
-    op_ads, warnings = {}, []
+    op_ads, op_links, warnings = {}, {}, []
     for op in ops:
         name = op.get("name", "")
         try:
             print(f"[OpAD] Generating AD for: {name}")
-            op_ads[name] = clean_op_ad(llm_call(build_op_ad_prompt(op, state)))
+            mm, links = split_op_ad(llm_call(build_op_ad_prompt(op, state)))
+            op_ads[name] = clean_op_ad(mm)
+            op_links[name] = links
         except Exception as e:
             warnings.append(f"Operation AD for {name} could not be generated: {e} - "
                             f"it will be generated again after Apply.")
     for w in warnings:
         print(f"[OpAD] WARNING: {w}")
-    return {"op_ads": op_ads,
+    return {"op_ads": op_ads, "op_ad_links": op_links,
             "design_warnings": list(state.get("design_warnings") or []) + warnings}
 
 
@@ -1512,13 +1604,16 @@ def fan_out_ad_node(state: DesignState):
         name = op.get("name", "")
         try:
             mermaid = op_ads.get(name) or ""
+            explicit = (state.get("op_ad_links") or {}).get(name, {})
             if not mermaid.strip():
                 print(f"[FanOut] Generating AD for: {name}")
-                mermaid = clean_op_ad(llm_call(build_op_ad_prompt(op, state)))
-            else:
-                mermaid = clean_op_ad(mermaid)
+                mermaid, explicit = split_op_ad(llm_call(build_op_ad_prompt(op, state)))
+            mermaid = clean_op_ad(mermaid)
+            links, link_warn = resolve_action_links(mermaid, explicit, name, state)
             res = create_operation_ad(state["component_name"], name, mermaid, r,
-                                      module=op.get("module"), replace=name in replace)
+                                      module=op.get("module"), replace=name in replace,
+                                      analysis_links=links, usecase=state["current_usecase"])
+            res.setdefault("errors", []).extend(link_warn)
         except Exception as e:
             res = {"success": False, "errors": [f"{e}"]}
         print(f"[FanOut] {name}: {res}")
@@ -1527,7 +1622,7 @@ def fan_out_ad_node(state: DesignState):
             errors.append(f"Operation AD {name}: {err}")
 
     return {"operation_ads": results, "errors": errors, "op_ads": {}, "op_ads_replace": [],
-            "ad_only_ops": []}
+            "op_ad_links": {}, "ad_only_ops": []}
 
 
 def _with_flowchart_header(text: str) -> str:

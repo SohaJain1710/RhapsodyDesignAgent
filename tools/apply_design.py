@@ -120,6 +120,7 @@ def normalize_edits(edits: dict, component_name: str, usecase: str = "",
         "ibd_delta"     : {"ports": iv["ports"], "links": iv["links"]},
         "op_ads"        : op_ads,
         "op_ads_replace": [n for n in (edits.get("op_ads_edited") or []) if n in op_ads],
+        "op_ad_links"   : edits.get("op_ad_links") or {},
         "ad_only_ops"   : ad_only,
         "warnings"      : v["warnings"] + iv["warnings"],
         "ibd_name"      : edits.get("ibd_name") or "",
@@ -205,18 +206,24 @@ def apply_design_state(state: dict, component_name: str) -> dict:
             except Exception:
                 errors.append(f"Operation ADs not generated for {[o.get('name') for o in missing]}: "
                               f"LLM relay not available")
-        from design_graph_unified import build_op_ad_prompt, clean_op_ad
+        from design_graph_unified import (build_op_ad_prompt, clean_op_ad,
+                                          split_op_ad, resolve_action_links)
         for op in ad_targets:
             name = op.get("name", "")
             mermaid = op_ads_map.get(name) or ""
+            explicit = (state.get("op_ad_links") or {}).get(name, {})
             try:
                 if not mermaid.strip():
                     if not relay_available:
                         continue
                     from llm_node import llm_call
-                    mermaid = llm_call(build_op_ad_prompt(op, state))
-                res = create_operation_ad(component_name, name, clean_op_ad(mermaid), r,
-                                          module=op.get("module"), replace=name in replace)
+                    mermaid, explicit = split_op_ad(llm_call(build_op_ad_prompt(op, state)))
+                mermaid = clean_op_ad(mermaid)
+                links, link_warn = resolve_action_links(mermaid, explicit, name, state)
+                res = create_operation_ad(component_name, name, mermaid, r,
+                                          module=op.get("module"), replace=name in replace,
+                                          analysis_links=links, usecase=state.get("usecase"))
+                res.setdefault("errors", []).extend(link_warn)
             except Exception as e:
                 res = {"success": False, "errors": [str(e)]}
             op_ads.append({"operation": name, "result": res})

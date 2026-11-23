@@ -110,14 +110,109 @@ def _existing_ads(op):
     return found
 
 
+def _norm_text(t) -> str:
+    import re
+    return re.sub(r"\W+", " ", str(t or "")).strip().lower()
+
+
+def find_analysis_ad(dd_pkgs, usecase):
+    """Analysis Activity Diagram of a use case ('<usecase>AD', or a name match)."""
+    if not usecase:
+        return None
+    try:
+        from read_detailed_ad import find_behavioral_diagram
+        d, _ = find_behavioral_diagram(dd_pkgs, usecase + "AD")
+        if d is not None:
+            return d
+    except Exception:
+        pass
+    want = usecase.lower().replace(" ", "").replace("_", "")
+    for pkg in dd_pkgs:
+        try:
+            bd = pkg.behavioralDiagrams
+            for i in range(1, bd.Count + 1):
+                d = bd.Item(i)
+                n = d.name.lower().replace(" ", "").replace("_", "")
+                if want in n or n.startswith(want):
+                    return d
+        except Exception:
+            pass
+    return None
+
+
+def _analysis_states(analysis_ad):
+    """{normalized text: state} for the action states of an analysis AD, by
+    entry action text and by element name."""
+    out = {}
+    if analysis_ad is None:
+        return out
+    try:
+        elems = analysis_ad.getElementsInDiagram()
+        for i in range(1, elems.Count + 1):
+            e = elems.Item(i)
+            try:
+                mc = getattr(e, "metaClass", None) or getattr(e, "metaclass", None)
+                if mc not in ("State", "ActionState", "Action"):
+                    continue
+                for key in (getattr(e, "entryAction", ""), e.name, str(e.name).replace("_", " ")):
+                    k = _norm_text(key)
+                    if k and k not in out:
+                        out[k] = e
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
+
+
+def link_to_analysis(elements: dict, analysis_links: dict, analysis_ad) -> list:
+    """«trace» dependency from each Operation AD action to the Analysis AD
+    action(s) it refines. Returns error strings."""
+    errors = []
+    if not analysis_links:
+        return errors
+    if analysis_ad is None:
+        return ["Analysis AD of the use case not found - Operation AD actions not traced"]
+    states = _analysis_states(analysis_ad)
+    for aid, texts in analysis_links.items():
+        elem = elements.get(aid)
+        if elem is None:
+            continue
+        for text in texts:
+            target = states.get(_norm_text(text))
+            if target is None:
+                # names are derived from the first 64 chars of the label
+                target = next((st for k, st in states.items()
+                               if k and _norm_text(text).startswith(k)), None)
+            if target is None:
+                errors.append(f"action {aid}: analysis action '{text}' not found in "
+                              f"{analysis_ad.name} - not traced")
+                continue
+            try:
+                dep = elem.addDependencyTo(target)
+                try:
+                    dep.addStereotype("trace", "Dependency")
+                except Exception:
+                    try: dep.addStereotype("trace", "")
+                    except Exception: pass
+                print(f"[OpAD]   Traced {aid} -> {target.name}")
+            except Exception as e:
+                errors.append(f"action {aid}: trace to '{text}' failed: {e}")
+    return errors
+
+
 def create_operation_ad(component_name: str, op_name: str, mermaid_str: str,
-                        rhapsody=None, module: str = None, replace: bool = False) -> dict:
+                        rhapsody=None, module: str = None, replace: bool = False,
+                        analysis_links: dict = None, usecase: str = None) -> dict:
     """
     Create the Operation Activity Diagram of `op_name` on its module class.
 
     module  : module class that owns the operation (default: component name)
     replace : an existing AD is replaced (reviewer edited it); otherwise an
               existing AD is kept and the call is reported as skipped
+    analysis_links : {design action id: [analysis action text]} → each action of
+              the new AD gets a «trace» dependency to its analysis action(s)
+              in the use case's Analysis AD (`usecase`)
     Always returns {"success", "errors", ...}.
     """
     if rhapsody is None:
@@ -179,6 +274,11 @@ def create_operation_ad(component_name: str, op_name: str, mermaid_str: str,
     except Exception as e:
         return fail(f"create_activity_diagram failed: {e}")
     errors += result.get("errors", []) or []
+    if analysis_links:
+        errors += link_to_analysis(result.get("elements") or {}, analysis_links,
+                                   find_analysis_ad(dd_pkgs, usecase))
+        try: project.save()
+        except Exception: pass
     print(f"[OpAD] Done: {ad_name}")
     return {
         "success"  : len(errors) == 0,
