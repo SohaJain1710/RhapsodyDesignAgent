@@ -28,7 +28,7 @@ def find_package_recursive(parent, name):
         if pkg.name == name:
             return pkg
         r = find_package_recursive(pkg, name)
-        if r:
+        if r is not None:
             return r
     return None
 
@@ -53,7 +53,7 @@ def find_sd_by_name(pkg, name):
 
 def find_class_recursive(parent, name):
     """Find a class by name anywhere under `parent` (packages searched recursively)."""
-    if not parent:
+    if parent is None:
         return None
     try:
         for i in range(1, parent.classes.Count + 1):
@@ -65,7 +65,7 @@ def find_class_recursive(parent, name):
     try:
         for i in range(1, parent.packages.Count + 1):
             found = find_class_recursive(parent.packages.Item(i), name)
-            if found:
+            if found is not None:
                 return found
     except Exception:
         pass
@@ -118,7 +118,7 @@ def find_stereotype_by_name(root, stereo_name):
         try:
             for i in range(1, pkg.packages.Count + 1):
                 found = walk(pkg.packages.Item(i))
-                if found:
+                if found is not None:
                     return found
         except Exception:
             pass
@@ -256,7 +256,7 @@ def find_element_by_guid(project, guid):
         try:
             for i in range(1, pkg.packages.Count + 1):
                 found = walk_pkg(pkg.packages.Item(i))
-                if found:
+                if found is not None:
                     return found
         except Exception:
             pass
@@ -265,7 +265,7 @@ def find_element_by_guid(project, guid):
     try:
         for i in range(1, project.packages.Count + 1):
             found = walk_pkg(project.packages.Item(i))
-            if found:
+            if found is not None:
                 return found
     except Exception:
         pass

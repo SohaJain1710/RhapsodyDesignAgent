@@ -66,7 +66,7 @@ def find_package_recursive(parent, name, depth=0, max_depth=12):
             if pkg.name == name:
                 return pkg
             r = find_package_recursive(pkg, name, depth + 1)
-            if r:
+            if r is not None:
                 return r
     except:
         pass

@@ -11,109 +11,57 @@ Shows:
 from __future__ import annotations
 
 
+import re as _re
+
+
+def _id(*parts) -> str:
+    return "__".join(_re.sub(r"\W", "_", str(p or "")) for p in parts)
+
+
+def _label(text: str) -> str:
+    return str(text).replace('"', "'")
+
+
 def to_mermaid(ibd: dict) -> str:
-    diagram_name = ibd.get("diagram_name", "IBD")
-    objects      = ibd.get("objects", [])
-    ports        = {p["name"]: p for p in ibd.get("ports", [])}
-    links        = ibd.get("links", [])
+    """IBD as Mermaid: objects as subgraphs, ports with FULL contracts
+    (+provided / -required), links between ports."""
+    if not ibd:
+        return "graph LR\n    %% No IBD (StructureDiagram) in the DetailedDesign package"
+    objects = ibd.get("objects", [])
+    port_by = {(p.get("owner"), p["name"]): p for p in ibd.get("ports", [])}
+    lines = ["graph LR", "", f"    %% IBD: {ibd.get('diagram_name', 'IBD')}", ""]
 
-    lines = [
-        f"graph LR",
-        f"",
-        f"    %% IBD: {diagram_name}",
-        f"",
-    ]
-
-    # Build a map: object_name -> [port_names]
-    obj_ports = {o["name"]: o.get("ports", []) for o in objects}
-
-    # Draw each object as a subgraph with its ports
     for obj in objects:
-        obj_name = obj["name"]
-        obj_id   = obj_name.replace("-", "_")
-        mc       = obj.get("metaclass", "Object")
-        # Class = component boundary, Object = internal part instance
-        if mc == "Class":
-            label = f"«Component»\\n{obj_name}"
-        else:
-            label = f"«Part»\\n{obj_name}"
+        name = obj["name"]
+        mc = obj.get("metaClass") or obj.get("metaclass") or "Object"
+        typ = obj.get("type") or name
+        label = (f"«Component» {name}" if mc == "Class"
+                 else f"«Part» {name} : {typ}")
+        lines.append(f'    subgraph {_id(name)} ["{_label(label)}"]')
+        for pn in obj.get("ports", []):
+            p = port_by.get((name, pn), {})
+            contract = " ".join([f"+{i}" for i in p.get("provided", [])] +
+                                [f"-{i}" for i in p.get("required", [])])
+            text = f"{pn}<br>{contract}" if contract else pn
+            lines.append(f'        {_id(name, pn)}["{_label(text)}"]')
+        lines.append("    end")
+        lines.append("")
 
-        lines.append(f"    subgraph {obj_id} [\"{label}\"]")
-        for port_name in obj.get("ports", []):
-            port_id = f"{obj_id}__{port_name.replace('-','_')}"
-            port    = ports.get(port_name, {})
-            prov    = port.get("provided", [])
-            req     = port.get("required", [])
-            if prov:
-                iface_str = ", ".join(prov[:2]) + ("..." if len(prov) > 2 else "")
-                lines.append(f'        {port_id}["{port_name}\\n+{iface_str}"]')
-            elif req:
-                iface_str = ", ".join(req[:2]) + ("..." if len(req) > 2 else "")
-                lines.append(f'        {port_id}["{port_name}\\n-{iface_str}"]')
-            else:
-                lines.append(f'        {port_id}["{port_name}"]')
-        lines.append(f"    end")
-        lines.append(f"")
-
-    # Draw links as edges between port nodes
-    lines.append(f"    %% Connections")
-    for link in links:
-        from_port = link.get("from_port")
-        from_obj  = link.get("from_obj")
-        to_port   = link.get("to_port")
-        to_obj    = link.get("to_obj")
-
-        # Swap reversed endpoints (some links have only toPort set)
-        if not from_port and not from_obj and (to_port or to_obj):
-            from_port, to_port = to_port, from_port
-            from_obj,  to_obj  = to_obj,  from_obj
-
-        if not (from_port or from_obj):
-            continue  # skip fully unresolved
-
-        # Build source node id
-        if from_port and from_obj:
-            src = f"{from_obj.replace('-','_')}__{from_port.replace('-','_')}"
-        elif from_obj:
-            src = from_obj.replace("-", "_")
-        else:
-            src = from_port.replace("-", "_") if from_port else None
-
-        # Build target node id — even partial (obj only) is useful
-        if to_port and to_obj:
-            tgt = f"{to_obj.replace('-','_')}__{to_port.replace('-','_')}"
-        elif to_obj:
-            tgt = to_obj.replace("-", "_")
-        elif to_port:
-            for o in objects:
-                if to_port in o.get("ports", []):
-                    tgt = f"{o['name'].replace('-','_')}__{to_port.replace('-','_')}"
-                    break
-            else:
-                tgt = to_port.replace("-", "_")
-        elif from_obj:
-            # Only from side known — still render as comment
-            lines.append(f"    %% {link.get('name','?')}: {src} -> (unresolved)")
+    lines.append("    %% Connections (obj.port -- obj.port)")
+    for l in ibd.get("links", []):
+        fo, fp, to, tp = l.get("from_obj"), l.get("from_port"), l.get("to_obj"), l.get("to_port")
+        if not (fp and tp):
+            lines.append(f"    %% {l.get('name') or 'link'}: {fo}.{fp} -- {to}.{tp} (incomplete)")
             continue
-        else:
-            continue
-
-        if src and tgt:
-            # Skip self-loops (same port connected to itself)
-            if src == tgt:
-                lines.append(f"    %% skipped self-loop: {src}")
-                continue
-            # Use port names as label — more readable than truncated link name
-            if from_port and to_port and from_port != to_port:
-                label = f"{from_port[:20]}↔{to_port[:20]}"
-                lines.append(f"    {src} -->|{label}| {tgt}")
-            else:
-                lines.append(f"    {src} --> {tgt}")
-
+        src, tgt = _id(fo, fp), _id(to, tp)
+        if src != tgt:
+            lines.append(f"    {src} --- {tgt}")
     return "\n".join(lines)
 
 
 def mermaid_with_context(ibd: dict) -> str:
+    if not ibd:
+        return to_mermaid(ibd)
     s = ibd.get("summary", {})
     mermaid = to_mermaid(ibd)
     # Insert metadata as comments at the top of the diagram

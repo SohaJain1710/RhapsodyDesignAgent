@@ -244,3 +244,138 @@ def build_bdd_plans(component_name: str, new_ops: list, new_intfs: list,
         "interface_pkg"        : interface_pkg or "",
     }
     return op_plans, intf_plan
+
+
+# ── IBD validation ────────────────────────────────────────────────────────────
+
+def _as_list(v) -> list:
+    if v is None or v == "":
+        return []
+    if isinstance(v, str):
+        return [x.strip() for x in v.split(",") if x.strip()]
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return []
+
+
+def _split_end(text: str):
+    """'obj.port' / 'obj::port' → (obj, port); 'port' → ('', port)."""
+    text = str(text or "").strip()
+    for sep in ("::", ".", "/"):
+        if sep in text:
+            a, b = text.rsplit(sep, 1)
+            return a.strip(), b.strip()
+    return "", text
+
+
+def normalize_link(link) -> dict | None:
+    if not isinstance(link, dict):
+        return None
+    out = {k: (str(link.get(k) or "").strip()) for k in ("from_obj", "from_port", "to_obj", "to_port")}
+    # accept {"from": "obj.port", "to": "obj.port"}
+    if not out["from_port"] and link.get("from"):
+        out["from_obj"], out["from_port"] = _split_end(link["from"])
+    if not out["to_port"] and link.get("to"):
+        out["to_obj"], out["to_port"] = _split_end(link["to"])
+    if link.get("name"):
+        out["name"] = str(link["name"]).strip()
+    return out if out["from_port"] and out["to_port"] else None
+
+
+def validate_ibd(ibd_delta, module_names: list, component_name: str,
+                 realizations: list, known_interfaces: list,
+                 existing_ports: dict = None) -> dict:
+    """Normalize LLM / reviewer IBD proposals.
+
+    - every port gets an owning module ("module"); default = the module that
+      realizes one of its provided interfaces, else the single module
+    - provided/required become lists; only interfaces that exist or are
+      created/realized in this run are kept
+    - duplicate ports (same module + name) merged; ports that already exist
+      with the same contracts are dropped
+    - links need both ports; "from"/"to" strings like "obj.port" accepted
+    Returns {"ports", "links", "warnings"}.
+    """
+    module_names = list(module_names or [])
+    existing_ports = existing_ports or {}
+    known = set(known_interfaces or []) | {r.get("general") for r in realizations or [] if isinstance(r, dict)}
+    realizer = {}
+    for r in realizations or []:
+        if isinstance(r, dict) and r.get("general") and r.get("specific"):
+            realizer.setdefault(r["general"], r["specific"])
+    fallback = default_module(module_names, component_name)
+    warnings = []
+
+    delta = ibd_delta if isinstance(ibd_delta, dict) else {}
+    ports, index, dropped = [], {}, set()
+    for raw in delta.get("ports", []) or []:
+        p = {"name": raw} if isinstance(raw, str) else dict(raw) if isinstance(raw, dict) else None
+        if not p or not str(p.get("name") or "").strip():
+            continue
+        p["name"] = str(p["name"]).strip()
+        p.pop("ibd_level", None)
+        prov, req = _as_list(p.get("provided")), _as_list(p.get("required"))
+        for kind, lst in (("provided", prov), ("required", req)):
+            unknown = [i for i in lst if known and i not in known]
+            if unknown:
+                warnings.append(f"Port {p['name']}: {kind} interface(s) {unknown} are not part of "
+                                f"this design (not created/realized here) - removed.")
+            lst[:] = [i for i in lst if not known or i in known]
+        p["provided"], p["required"] = prov, req
+        if not prov and not req:
+            warnings.append(f"Port {p['name']}: no interfaces left - port dropped.")
+            dropped.add(p["name"])
+            continue
+
+        given = p.get("module") or p.get("owner") or ""
+        mod = resolve_module(given, module_names, component_name)
+        if mod is None:
+            mod = next((realizer[i] for i in prov if i in realizer
+                        and resolve_module(realizer[i], module_names, component_name)), None) or fallback
+            if mod is None:
+                mod = module_names[0]
+                warnings.append(f"Port {p['name']}: owning module '{given or '?'}' unknown - "
+                                f"assigned to {mod}, please check.")
+            elif given:
+                warnings.append(f"Port {p['name']}: '{given}' is not a module - placed on {mod}.")
+        p["module"] = mod
+        p.pop("owner", None)
+        for i in prov:
+            if i in realizer and realizer[i] != mod:
+                warnings.append(f"Port {p['name']} on {mod} provides {i}, which is realized by "
+                                f"{realizer[i]} - please check.")
+        if not p["name"].endswith("Prt"):
+            warnings.append(f"Port {p['name']}: name does not follow the ...Prt convention.")
+
+        ex = existing_ports.get(mod, {}).get(p["name"])
+        if ex is not None and set(prov) <= set(ex.get("provided", [])) \
+                and set(req) <= set(ex.get("required", [])):
+            continue            # already there with these contracts
+        key = (mod, p["name"])
+        if key in index:        # merge duplicates
+            q = index[key]
+            q["provided"] = list(dict.fromkeys(q["provided"] + prov))
+            q["required"] = list(dict.fromkeys(q["required"] + req))
+            continue
+        index[key] = p
+        ports.append(p)
+
+    links, seen = [], set()
+    for raw in delta.get("links", []) or []:
+        l = normalize_link(raw)
+        if l is None:
+            warnings.append(f"Link {raw!r}: both ports (from_port, to_port) are required - dropped.")
+            continue
+        existing_names = {pn for ports_ in existing_ports.values() for pn in ports_}
+        gone = [pn for pn in (l["from_port"], l["to_port"])
+                if pn in dropped and pn not in existing_names and pn not in {q["name"] for q in ports}]
+        if gone:
+            warnings.append(f"Connector {l['from_port']} -- {l['to_port']}: port {gone[0]} was dropped - "
+                            f"connector dropped.")
+            continue
+        key = (l["from_obj"], l["from_port"], l["to_obj"], l["to_port"])
+        if key in seen:
+            continue
+        seen.add(key)
+        links.append(l)
+    return {"ports": ports, "links": links, "warnings": warnings}

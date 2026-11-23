@@ -32,184 +32,170 @@ def get_rhapsody():
     return rhapsody, project
 
 
-def read_ibd_from_package(dd_pkg, comp_cls=None):
-    """Read the StructureDiagram from a DetailedDesign package."""
+def find_ibd(dd_pkg, preferred_names=None):
+    """The package-level IBD: a StructureDiagram named like a preferred name
+    (e.g. '<module>IBD'), else one whose name contains 'IBD', else the first."""
     try:
         sds = dd_pkg.structureDiagrams
-        if sds.Count == 0:
-            return None
-        ibd = sds.Item(1)
+        diags = [sds.Item(i) for i in range(1, sds.Count + 1)]
     except Exception as e:
         print(f"[ReadIBD] structureDiagrams failed: {e}", file=sys.stderr)
         return None
+    if not diags:
+        return None
+    for want in preferred_names or []:
+        for d in diags:
+            if d.name == want:
+                return d
+    return next((d for d in diags if "IBD" in d.name.upper()), diags[0])
 
-    elems = ibd.getElementsInDiagram()
-    print(f"[ReadIBD] {ibd.name}: {elems.Count} elements", file=sys.stderr)
 
-    objects  = {}   # name -> {metaclass, ports: []}
-    ports    = {}   # name -> {owner_object, provided, required}
-    links    = []
-
-    # First pass: collect objects and ports
-    current_object = None
-    for i in range(1, elems.Count + 1):
-        e = elems.Item(i)
-        try:
-            mc = e.metaClass
-            name = e.name
-        except:
-            continue
-
-        if mc in ("Class", "Object"):
-            current_object = name
-            objects[name] = {"metaClass": mc, "ports": []}
-
-        elif mc == "Port":
-            provided = []
-            required = []
-            try:
-                pi = e.providedInterfaces
-                provided = [pi.Item(j).name for j in range(1, pi.Count+1)]
-            except: pass
-            try:
-                ri = e.requiredInterfaces
-                required = [ri.Item(j).name for j in range(1, ri.Count+1)]
-            except: pass
-            guid = ""
-            try: guid = str(e.GUID)
-            except: pass
-
-            port_entry = {
-                "name"    : name,
-                "owner"   : current_object,
-                "provided": provided,
-                "required": required,
-                "guid"    : guid,
-            }
-            # Prefer Class owner — if port already registered under a Class,
-            # don't overwrite with Object/Instance owner
-            existing = ports.get(name)
-            if existing:
-                existing_owner_mc = objects.get(existing["owner"], {}).get("metaClass", "")
-                current_mc = objects.get(current_object, {}).get("metaClass", "")
-                if existing_owner_mc == "Class" and current_mc != "Class":
-                    # Keep the Class owner, just add this object to its ports
-                    if current_object and current_object in objects:
-                        objects[current_object]["ports"].append(name)
-                    continue
-            ports[name] = port_entry
-            if current_object and current_object in objects:
-                objects[current_object]["ports"].append(name)
-
-    # Read links from the component class (better fromPort/toPort access)
-    links    = []
+def find_component_class(comp_pkg, component_name):
+    """The SW component class (stereotype AB12SWComponent, else same name)."""
+    if comp_pkg is None:
+        return None
     try:
-        # Use passed comp_cls or find it from the owner package
-        if comp_cls is None:
-            try:
-                owner_pkg = dd_pkg.owner
-                if owner_pkg:
-                    for i in range(1, owner_pkg.classes.Count + 1):
-                        cls = owner_pkg.classes.Item(i)
-                        try:
-                            if cls.name in dd_pkg.name:
-                                comp_cls = cls
-                                break
-                        except: pass
-            except: pass
+        classes = [comp_pkg.classes.Item(i) for i in range(1, comp_pkg.classes.Count + 1)]
+    except Exception:
+        return None
+    for c in classes:
+        try:
+            sts = [c.stereotypes.Item(k).name for k in range(1, c.stereotypes.Count + 1)]
+            if "AB12SWComponent" in sts:
+                return c
+        except Exception:
+            pass
+    return next((c for c in classes if c.name == component_name), classes[0] if classes else None)
 
-        if comp_cls:
-            nested_links = comp_cls.getNestedElementsByMetaClass("Link", 1)
-            print(f"[ReadIBD] Links on comp_cls: {nested_links.Count}", file=sys.stderr)
-            for i in range(1, nested_links.Count + 1):
-                lnk = nested_links.Item(i)
-                try:
-                    link_name  = lnk.name
-                    from_port  = None
-                    to_port    = None
-                    from_obj   = None
-                    to_obj     = None
 
-                    # Use fromElement/toElement metaClass to determine endpoints
-                    try:
-                        fe = lnk.fromElement
-                        te = lnk.toElement
-                        fe_mc = fe.metaClass if fe else None
-                        te_mc = te.metaClass if te else None
+def _iface_names(coll):
+    try:
+        return [coll.Item(j).name for j in range(1, coll.Count + 1)]
+    except Exception:
+        return []
 
-                        if fe_mc == "Object":
-                            from_obj = lnk.From.name
-                            fp = lnk.fromPort
-                            if fp: from_port = fp.name
-                        elif fe_mc == "Port":
-                            # From is a boundary port on the component Class
-                            from_port = lnk.From.name
-                            # Always resolve to the Class object (component boundary)
-                            from_obj = next(
-                                (n for n, d in objects.items()
-                                 if d.get("metaClass") == "Class"),
-                                ports.get(from_port, {}).get("owner")
-                            )
 
-                        if te_mc == "Port":
-                            # to is a port — use lnk.to.name as to_port
-                            to_port = lnk.to.name
-                            # Find which object owns this port
-                            to_obj = ports.get(to_port, {}).get("owner")
-                            # If to_obj == from_obj, resolve to Class boundary
-                            if to_obj == from_obj:
-                                for obj_name, obj_data in objects.items():
-                                    if (obj_data.get("metaClass") == "Class" and
-                                            to_port in obj_data.get("ports", [])):
-                                        to_obj = obj_name
-                                        break
-                        elif te_mc == "Object":
-                            to_obj  = lnk.to.name
-                            tp = lnk.toPort
-                            if tp: to_port = tp.name
+def module_ports(cls) -> dict:
+    """{port_name: {"provided": [...], "required": [...]}} of a class."""
+    out = {}
+    try:
+        for i in range(1, cls.ports.Count + 1):
+            pt = cls.ports.Item(i)
+            out[pt.name] = {"provided": _iface_names(pt.providedInterfaces),
+                            "required": _iface_names(pt.requiredInterfaces)}
+    except Exception:
+        pass
+    return out
 
-                    except: pass
 
-                    # Fallback: use fromPort to resolve from_obj
-                    if not from_obj and from_port:
-                        from_obj = ports.get(from_port, {}).get("owner")
-
-                    # If from_obj looks like a port name, it means lnk.From
-                    # returned a port object — swap to use it as from_port
-                    if from_obj and from_obj in ports and not from_port:
-                        from_port = from_obj
-                        from_obj  = ports.get(from_port, {}).get("owner")
-
-                    links.append({
-                        "name"     : link_name,
-                        "from_port": from_port,
-                        "from_obj" : from_obj,
-                        "to_port"  : to_port,
-                        "to_obj"   : to_obj,
-                    })
-                except: pass
+def read_ibd_from_package(dd_pkg, comp_cls=None, ibd_names=None):
+    """Read the package-level IBD (StructureDiagram) of a DetailedDesign package.
+    Returns None when the package has no structure diagram."""
+    ibd = find_ibd(dd_pkg, ibd_names)
+    if ibd is None:
+        return None
+    try:
+        elems = ibd.getElementsInDiagram()
+        elem_list = [elems.Item(i) for i in range(1, elems.Count + 1)]
     except Exception as e:
-        print(f"[ReadIBD] Link read failed: {e}", file=sys.stderr)
-        # Fallback: read from diagram elements
-        for i in range(1, elems.Count + 1):
-            e = elems.Item(i)
-            try:
-                if e.metaClass != "Link":
-                    continue
-                links.append({"name": e.name, "from_port": None,
-                              "from_obj": None, "to_port": None, "to_obj": None})
-            except: pass
+        print(f"[ReadIBD] getElementsInDiagram failed: {e}", file=sys.stderr)
+        elem_list = []
+    print(f"[ReadIBD] {ibd.name}: {len(elem_list)} elements", file=sys.stderr)
 
+    objects = {}   # name -> {metaClass, type, ports: []}
+    ports   = {}   # (owner, name) -> port entry
+    type_to_objects = {}   # class name -> [object names typed by it]
+    current_object = None
+
+    for e in elem_list:
+        try:
+            mc, name = e.metaClass, e.name
+        except Exception:
+            continue
+        if mc in ("Class", "Object", "Instance", "Part"):
+            current_object = name
+            typ = name
+            if mc != "Class":
+                try:
+                    oc = e.otherClass
+                    if oc is not None:
+                        typ = oc.name
+                except Exception:
+                    pass
+            objects.setdefault(name, {"metaClass": "Class" if mc == "Class" else "Object",
+                                      "type": typ, "ports": []})
+            type_to_objects.setdefault(typ, []).append(name)
+
+    for e in elem_list:
+        try:
+            if e.metaClass != "Port":
+                continue
+            name = e.name
+        except Exception:
+            continue
+        # The port's real owner is its class; show it on the objects of that type
+        owner_cls = None
+        try:
+            ow = e.owner
+            if ow is not None:
+                owner_cls = ow.name
+        except Exception:
+            pass
+        holders = type_to_objects.get(owner_cls) or ([owner_cls] if owner_cls in objects else [])
+        entry = {"name": name, "owner_class": owner_cls,
+                 "provided": _iface_names(e.providedInterfaces),
+                 "required": _iface_names(e.requiredInterfaces)}
+        for h in holders or [None]:
+            key = (h, name)
+            if key in ports:
+                continue
+            ports[key] = {**entry, "owner": h}
+            if h in objects and name not in objects[h]["ports"]:
+                objects[h]["ports"].append(name)
+
+    # Links live on the SW component class
+    links = []
+    if comp_cls is not None:
+        try:
+            nested = comp_cls.getNestedElementsByMetaClass("Link", 1)
+            for i in range(1, nested.Count + 1):
+                lnk = nested.Item(i)
+                entry = {"name": "", "from_obj": None, "from_port": None,
+                         "to_obj": None, "to_port": None}
+                try: entry["name"] = lnk.name
+                except Exception: pass
+                for side, obj_attr, port_attr in (("from", "from", "fromPort"), ("to", "to", "toPort")):
+                    try:
+                        o = getattr(lnk, obj_attr if obj_attr != "from" else "From")
+                        if o is not None:
+                            if o.metaClass == "Port":
+                                entry[f"{side}_port"] = o.name
+                                entry[f"{side}_obj"] = comp_cls.name   # boundary port
+                            else:
+                                entry[f"{side}_obj"] = o.name
+                    except Exception:
+                        pass
+                    try:
+                        pt = getattr(lnk, port_attr)
+                        if pt is not None:
+                            entry[f"{side}_port"] = pt.name
+                    except Exception:
+                        pass
+                links.append(entry)
+        except Exception as e:
+            print(f"[ReadIBD] Link read failed: {e}", file=sys.stderr)
+
+    port_list = list(ports.values())
     return {
         "diagram_name": ibd.name,
         "objects"     : [{"name": k, **v} for k, v in objects.items()],
-        "ports"       : list(ports.values()),
+        "ports"       : port_list,
         "links"       : links,
         "summary": {
-            "total_objects"  : len(objects),
-            "total_ports"    : len(ports),
-            "total_links"    : len(links),
-            "resolved_links" : sum(1 for l in links if l["from_port"] or l["from_obj"]),
+            "total_objects" : len(objects),
+            "total_ports"   : len(port_list),
+            "total_links"   : len(links),
+            "resolved_links": sum(1 for l in links if l["from_port"] and l["to_port"]),
         }
     }
 
@@ -223,17 +209,17 @@ if __name__ == "__main__":
     _, project = get_rhapsody()
 
     comp_pkg = find_package_recursive(project, args.component)
-    if not comp_pkg:
+    if comp_pkg is None:
         print(json.dumps({"error": f"Component '{args.component}' not found"}))
         sys.exit(1)
 
     dd_pkgs = find_dd_packages(comp_pkg)
     dd_pkg  = next((x for x in dd_pkgs if "Cfg" not in x.name), None)
-    if not dd_pkg:
+    if dd_pkg is None:
         print(json.dumps({"error": "No DetailedDesign package found"}))
         sys.exit(1)
 
-    result = read_ibd_from_package(dd_pkg)
+    result = read_ibd_from_package(dd_pkg, comp_cls=find_component_class(comp_pkg, args.component))
     if not result:
         print(json.dumps({"error": "No StructureDiagram found in DetailedDesign package"}))
         sys.exit(1)

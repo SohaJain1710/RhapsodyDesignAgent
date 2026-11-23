@@ -53,7 +53,8 @@ def _parse_static_view(static_view: str, component_name: str,
 
 
 def normalize_edits(edits: dict, component_name: str, usecase: str = "",
-                    module_names: list = None) -> dict:
+                    module_names: list = None, known_interfaces: list = None,
+                    existing_ports: dict = None) -> dict:
     """Normalize the design-review webview payload into graph/apply state fields.
 
     - new_operations / new_interfaces / ibd_delta / op_ads / updated_ad / req_map as sent
@@ -63,7 +64,7 @@ def normalize_edits(edits: dict, component_name: str, usecase: str = "",
       component's module classes (never the use case / SW component)
     - bdd_delta is (re)built so the selected interfaces are actually created
     """
-    from plan_normalize import validate_design
+    from plan_normalize import validate_design, validate_ibd
     usecase      = usecase or edits.get("usecase", "")
     module_names = list(module_names if module_names is not None else (edits.get("modules") or []))
     new_ops      = edits.get("new_operations", []) or []
@@ -95,6 +96,16 @@ def normalize_edits(edits: dict, component_name: str, usecase: str = "",
     op_ads = {k: v_ for k, v_ in (edits.get("op_ads") or {}).items()
               if k in op_names and v_ and v_.strip()}
 
+    # IBD: same validation as the LLM output. Interfaces the reviewer deselected
+    # are no longer "known", so ports providing/requiring them are cleaned up.
+    known = list(known_interfaces if known_interfaces is not None
+                 else (edits.get("known_interfaces") or []))
+    known += [i["name"] for i in new_intfs]
+    iv = validate_ibd(edits.get("ibd_delta") or {}, module_names, component_name,
+                      v["realizations"], known, existing_ports or {})
+    for w in iv["warnings"]:
+        print(f"[Edits] WARNING: {w}", file=sys.stderr)
+
     return {
         "usecase"       : usecase,
         "updated_ad"    : edits.get("updated_ad", ""),
@@ -103,9 +114,10 @@ def normalize_edits(edits: dict, component_name: str, usecase: str = "",
         "new_interfaces": new_intfs,
         "bdd_delta"     : {"classes": new_intfs, "realizations": v["realizations"],
                            "generalizations": []},
-        "ibd_delta"     : edits.get("ibd_delta") or {"ports": [], "links": []},
+        "ibd_delta"     : {"ports": iv["ports"], "links": iv["links"]},
         "op_ads"        : op_ads,
-        "warnings"      : v["warnings"],
+        "warnings"      : v["warnings"] + iv["warnings"],
+        "ibd_name"      : edits.get("ibd_name") or "",
         "module_names"  : module_names,
         "interface_stereotypes": edits.get("interface_stereotypes") or [],
         "interface_pkg" : edits.get("interface_pkg") or "",
@@ -158,17 +170,17 @@ def apply_design_state(state: dict, component_name: str) -> dict:
                                        diagram_name=state.get("bdd_intf_name","DetailedDesignInterfacesBDD"))
             errors.extend(res.get("errors") or ([res["error"]] if res.get("error") else []))
 
-        # IBD delta
-        ibd = state.get("ibd_delta", {})
-        if ibd.get("ports"):
-            plan = {
+        # IBD delta (ports and/or links)
+        ibd = state.get("ibd_delta", {}) or {}
+        if ibd.get("ports") or ibd.get("links"):
+            res = create_ibd({
                 "component_name": component_name,
+                "ibd_name"      : state.get("ibd_name", ""),
+                "module_names"  : state.get("module_names") or [],
                 "ports"         : ibd.get("ports", []),
                 "links"         : ibd.get("links", []),
-            }
-            res = create_ibd(plan, r)
-            if res.get("errors"):
-                errors.extend(res["errors"])
+            }, r)
+            errors.extend(res.get("errors") or ([res["error"]] if res.get("error") else []))
 
         # Operation ADs from webview editor — processed AFTER operations are created
         op_ads_map = state.get("op_ads", {})

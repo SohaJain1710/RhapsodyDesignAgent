@@ -344,12 +344,14 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
             ports.forEach(p => {
                 stream.markdown(
                     '\n**Port: `' + p.name + '`**' +
+                    '\n- Module: `' + (p.module || comp) + '`' +
                     ((p.provided||[]).length ? '\n- Provides: `' + p.provided.join(', ') + '`' : '') +
                     ((p.required||[]).length ? '\n- Requires: `' + p.required.join(', ') + '`' : '')
                 );
             });
             links.forEach(l => {
-                stream.markdown('\n**Link:** `' + (l.from||'') + '` → `' + (l.to||'') + '`');
+                stream.markdown('\n**Connector:** `' + (l.from_obj || comp) + '.' + (l.from_port || '?') +
+                    '` ↔ `' + (l.to_obj || comp) + '.' + (l.to_port || '?') + '`');
             });
         }
 
@@ -479,6 +481,7 @@ function openReviewWebview(context, data, comp, outputFile, stream, token) {
         new_interfaces  : data.new_interfaces || [],
         realizations    : data.realizations || [],
         modules         : data.modules || [],
+        known_interfaces: data.known_interfaces || [],
         warnings        : data.warnings || [],
         ibd_delta       : data.ibd_delta || { ports: [], links: [] },
     });
@@ -829,10 +832,11 @@ function render() {
         app.appendChild(intfDiv);
     }
 
-    // IBD Ports
-    if (S.ports.length) {
+    // IBD Ports + connectors
+    if (S.ports.length || S.links.length) {
         const ibdDiv = el('div', 'section');
         ibdDiv.appendChild(el('h2', '', '🔗 IBD Ports'));
+        const csv = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
         S.ports.forEach((port, i) => {
             const item = el('div', 'item');
             const cb   = document.createElement('input'); cb.type = 'checkbox'; cb.checked = port._sel;
@@ -840,14 +844,39 @@ function render() {
             item.appendChild(cb);
             const det = el('div', 'details');
             det.appendChild(el('div', 'title', '<code>' + esc(port.name) + '</code>'));
-            det.appendChild(el('div', 'meta', 'Provides: ' + esc((port.provided||[]).join(', ')) + ' | Requires: ' + esc((port.required||[]).join(', '))));
             const fields = el('div', 'fields');
-            fields.appendChild(field('Port Name', inp(port.name, v => S.ports[i].name = v, '160px')));
+            fields.appendChild(field('Port Name', inp(port.name, v => {
+                const old = S.ports[i].name; S.ports[i].name = v;
+                // keep connectors that use this port in sync
+                S.links.forEach(l => { if (l.from_port === old) l.from_port = v; if (l.to_port === old) l.to_port = v; });
+                refreshConnectors();
+            }, '160px')));
+            if (MODULES.length) {
+                if (!MODULES.includes(port.module)) S.ports[i].module = MODULES[0];
+                fields.appendChild(field('Module', selEl(MODULES, S.ports[i].module, v => S.ports[i].module = v)));
+            }
+            fields.appendChild(field('Provides (comma separated)', inp((port.provided||[]).join(', '), v => S.ports[i].provided = csv(v), '220px')));
+            fields.appendChild(field('Requires (comma separated)', inp((port.required||[]).join(', '), v => S.ports[i].required = csv(v), '220px')));
             det.appendChild(fields);
             item.appendChild(det);
             ibdDiv.appendChild(item);
         });
+        if (S.links.length) {
+            ibdDiv.appendChild(el('h2', '', '🔌 Connectors'));
+            S.links.forEach((l, i) => {
+                const item = el('div', 'item');
+                const cb   = document.createElement('input'); cb.type = 'checkbox'; cb.checked = l._sel;
+                cb.onchange = () => { S.links[i]._sel = cb.checked; };
+                item.appendChild(cb);
+                const det = el('div', 'details');
+                const title = el('div', 'title'); title.id = 'conn-' + i;
+                det.appendChild(title);
+                item.appendChild(det);
+                ibdDiv.appendChild(item);
+            });
+        }
         app.appendChild(ibdDiv);
+        refreshConnectors();
     }
 
     // Diagram sections (3 tabs)
@@ -967,6 +996,14 @@ function render() {
 
     refreshStatic(false);
     showTab(S.active_tab || 'static');
+}
+
+function refreshConnectors() {
+    S.links.forEach((l, i) => {
+        const t = document.getElementById('conn-' + i);
+        if (t) t.innerHTML = '<code>' + esc((l.from_obj || comp) + '.' + l.from_port) +
+            '</code> ↔ <code>' + esc((l.to_obj || comp) + '.' + l.to_port) + '</code>';
+    });
 }
 
 // Renaming an operation keeps its edited Dynamic View diagram and the selector in sync
@@ -1089,6 +1126,7 @@ function applyChanges() {
         new_interfaces     : S.new_interfaces.filter(i => i._sel).map(strip),
         realizations       : RAW.realizations || [],
         modules            : RAW.modules || [],
+        known_interfaces   : RAW.known_interfaces || [],
         ibd_delta          : {
             ports: S.ports.filter(p => p._sel).map(strip),
             links: S.links.filter(l => l._sel).map(strip),

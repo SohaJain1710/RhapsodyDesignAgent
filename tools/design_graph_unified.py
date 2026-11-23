@@ -71,6 +71,9 @@ class DesignState(TypedDict):
     interface_stereotypes: list    # stereotype(s) used by existing interfaces
     interface_pkg    : str         # package that holds existing interfaces
     design_warnings  : list        # validation warnings shown in the design review
+    known_interfaces : list        # interfaces that already exist in the component
+    ibd_name         : str         # package-level IBD diagram name
+    existing_ports   : dict        # {module: {port: {provided, required}}}
 
     # Shared LLM bus
     current_phase    : str         # which phase is using llm_node
@@ -246,34 +249,54 @@ Respond ONLY with valid JSON:
 
 DESIGN_IBD_PROMPT = """\
 You are a SysML architect working on AB12 Static Detailed Design (IBD level).
-Propose IBD changes (new ports) for new interfaces.
+Propose the IBD changes (ports and connectors) needed for the interfaces of this design step.
 
-# New Interfaces
-{new_interfaces}
+# Component
+{component}
 
-# Current IBD
+# Module Classes of this Component (port owners)
+{modules}
+
+# Interfaces of this Design Step (interface -> realizing module)
+{interfaces}
+
+# Existing Ports per Module (port: +provided -required)
+{existing_ports}
+
+# Current IBD (Mermaid)
 {ibd}
 
 Rules:
-- Only add ports for genuinely new interfaces not already in the IBD
+- Every port is owned by a MODULE class from the list above: set "module" to that class name
+- The module that REALIZES an interface PROVIDES it on one of its ports ("provided")
+- A module that USES an interface realized by another module REQUIRES it ("required")
+- Reuse an existing port when it fits (same port name, it will get the interface added);
+  only add genuinely new ports. Do not repeat ports that already have the interface
 - Port names MUST follow: rb_<moduleShortName>_<PortName>Prt  (e.g. rb_hvsm_VoltageRegulatorMonitoringPrt)
-- Provided interfaces: +, Required: -
-- Only propose what's missing
-- Two IBDs are required per module: one at the DetailedDesign package level (showing the module within
-  its SW component and its connections to sibling modules) and one inside the module package (showing
-  only the module's own ports). Indicate which IBD each proposed port belongs to.
+- Only use interfaces from "Interfaces of this Design Step"
+- Connectors ("links") join two ports. from_obj / to_obj are part names from the IBD
+  (e.g. itsRb_...) or module class names; for a port on the SW component boundary use
+  the component name "{component}". Only propose connectors that are really needed;
+  both ports must exist or be proposed above
 
 Respond ONLY with valid JSON:
 {{
   "ports": [
     {{
       "name": "rb_<moduleShortName>_<PortName>Prt",
+      "module": "<module class from the list>",
       "provided": ["rb_<moduleShortName>_<InterfaceName>Intf"],
-      "required": [],
-      "ibd_level": "dd_package"
+      "required": []
     }}
   ],
-  "links": []
+  "links": [
+    {{
+      "from_obj": "<part name, module class or component>",
+      "from_port": "rb_<moduleShortName>_<PortName>Prt",
+      "to_obj": "<part name, module class or component>",
+      "to_port": "rb_<moduleShortName>_<OtherPortName>Prt"
+    }}
+  ]
 }}
 """
 
@@ -663,7 +686,7 @@ def _read_design_structure(project, dd_pkg, comp_pkg, bdds: list):
             pass
 
     stereotypes = [st for st, _ in intf_counter.most_common(1)]
-    return modules, stereotypes, intf_pkg
+    return modules, stereotypes, intf_pkg, list(dict.fromkeys(intf_names))
 
 
 def read_context_node(state: DesignState) -> dict:
@@ -743,17 +766,32 @@ def read_context_node(state: DesignState) -> dict:
 
         # Module classes (owners of new operations, realizers of interfaces),
         # existing interface stereotype(s) and the package interfaces live in
-        module_names, intf_stereotypes, intf_pkg = _read_design_structure(
+        module_names, intf_stereotypes, intf_pkg, intf_names = _read_design_structure(
             p, dd_pkg, comp_pkg, bdds_dd + bdds_intf)
         print(f"[Context] Modules: {module_names} | interface stereotypes: "
               f"{intf_stereotypes} | interface package: {intf_pkg or dd_pkg.name}")
         bdd_intf_str = bdd_mermaid(bdds_intf[0],
                            unrealized=unrealized) if bdds_intf else "%% No Interfaces BDD"
 
-        # IBD
-        comp_cls = comp_pkg.classes.Item(1)
-        ibd_data = read_ibd_from_package(dd_pkg, comp_cls=comp_cls)
-        ibd_str  = ibd_mermaid(ibd_data)
+        # IBD — failure-safe: a component without IBD must not lose the AD/BDD context
+        ibd_str, ibd_name, existing_ports = "%% No IBD", "", {}
+        try:
+            from read_ibd import find_component_class, module_ports
+            from create_bdd import find_class_recursive as _find_cls
+            comp_cls = find_component_class(comp_pkg, state["component_name"])
+            ibd_data = read_ibd_from_package(
+                dd_pkg, comp_cls=comp_cls,
+                ibd_names=[f"{m}IBD" for m in module_names] + [f"{state['component_name']}IBD"])
+            ibd_str  = ibd_mermaid(ibd_data)
+            ibd_name = (ibd_data or {}).get("diagram_name", "")
+            for m in module_names:
+                mcls = _find_cls(dd_pkg, m)
+                if mcls is not None:
+                    existing_ports[m] = module_ports(mcls)
+            print(f"[Context] IBD: {ibd_name or 'none'} | ports per module: "
+                  f"{ {k: len(v) for k, v in existing_ports.items()} }")
+        except Exception as e:
+            print(f"[Context] IBD read failed (continuing without IBD context): {e}")
 
         return {
             "existing_ad"    : ad_str,
@@ -767,6 +805,9 @@ def read_context_node(state: DesignState) -> dict:
             "module_names"   : module_names,
             "interface_stereotypes": intf_stereotypes,
             "interface_pkg"  : intf_pkg,
+            "known_interfaces": list(dict.fromkeys(intf_names + unrealized.get("all_interfaces", []))),
+            "ibd_name"       : ibd_name,
+            "existing_ports" : existing_ports,
         }
     except Exception as e:
         print(f"[Context] ERROR: {e}")
@@ -966,20 +1007,43 @@ def design_elements_parse_node(state: DesignState) -> dict:
 
 # ── Phase 3: Design IBD ───────────────────────────────────────────────────────
 
+def _ibd_interfaces(state) -> list:
+    """(interface, realizing module) pairs created or realized in this step."""
+    reals = (state.get("bdd_delta") or {}).get("realizations", []) or []
+    pairs = [(r["general"], r["specific"]) for r in reals
+             if isinstance(r, dict) and r.get("general")]
+    for i in state.get("new_interfaces", []) or []:
+        if not any(g == i.get("name") for g, _ in pairs):
+            pairs.append((i.get("name"), i.get("realized_by") or ""))
+    return pairs
+
+
 def design_ibd_prompt_node(state: DesignState) -> dict:
-    if not state.get("new_interfaces"):
-        # Skip IBD if no new interfaces
+    pairs = _ibd_interfaces(state)
+    if not pairs:
+        # Skip IBD if no interface is created or realized in this step
         return {
             "current_phase": "design_ibd_skip",
             "llm_prompt"  : "",
             "ibd_delta"   : {"ports": [], "links": []},
         }
+    existing = state.get("existing_ports") or {}
+    ex_lines = []
+    for mod, ports in existing.items():
+        ex_lines.append(f"{mod}:")
+        for pn, c in ports.items():
+            contract = " ".join([f"+{x}" for x in c.get("provided", [])] +
+                                [f"-{x}" for x in c.get("required", [])])
+            ex_lines.append(f"  - {pn}: {contract or '(no interfaces)'}")
     return {
         "current_phase": "design_ibd",
         "llm_prompt"  : DESIGN_IBD_PROMPT.format(
-            new_interfaces = json.dumps(
-                state.get("new_interfaces", []), indent=2),
-            ibd            = state["ibd"],
+            component      = state["component_name"],
+            modules        = "\n".join(f"- {m}" for m in state.get("module_names") or [])
+                             or f"- {state['component_name']}",
+            interfaces     = "\n".join(f"- {g} -> realized by {m or '(not set)'}" for g, m in pairs),
+            existing_ports = "\n".join(ex_lines) or "(none)",
+            ibd            = state.get("ibd") or "%% No IBD",
         ),
     }
 
@@ -987,10 +1051,18 @@ def design_ibd_prompt_node(state: DesignState) -> dict:
 def design_ibd_parse_node(state: DesignState) -> dict:
     if state.get("current_phase") == "design_ibd_skip":
         return {}
-    result = extract_json(state["llm_response"],
-                          default={"ports": [], "links": []})
-    print(f"[DesignIBD] Ports: {len(result.get('ports',[]))}")
-    return {"ibd_delta": result}
+    from plan_normalize import validate_ibd
+    result = extract_json(state["llm_response"], default={"ports": [], "links": []})
+    v = validate_ibd(result, state.get("module_names") or [], state["component_name"],
+                     (state.get("bdd_delta") or {}).get("realizations", []),
+                     list(state.get("known_interfaces") or [])
+                     + [i.get("name") for i in state.get("new_interfaces", []) or []],
+                     state.get("existing_ports") or {})
+    for w in v["warnings"]:
+        print(f"[DesignIBD] WARNING: {w}")
+    print(f"[DesignIBD] Ports: {len(v['ports'])}, Links: {len(v['links'])}")
+    return {"ibd_delta"      : {"ports": v["ports"], "links": v["links"]},
+            "design_warnings": list(state.get("design_warnings") or []) + v["warnings"]}
 
 
 # ── Human Review — helpers ────────────────────────────────────────────────────
@@ -1100,6 +1172,7 @@ def human_review_node(state: DesignState) -> dict:
         "new_interfaces": state.get("new_interfaces", []),
         "realizations"  : (state.get("bdd_delta") or {}).get("realizations", []),
         "modules"       : state.get("module_names") or [],
+        "known_interfaces": state.get("known_interfaces") or [],
         "warnings"      : state.get("design_warnings") or [],
         "ibd_delta"     : state.get("ibd_delta", {}),
         "message"       : "Review the proposed design changes. Reply 'apply' to approve or provide feedback.",
@@ -1118,7 +1191,9 @@ def human_review_node(state: DesignState) -> dict:
             from apply_design import normalize_edits
             norm = normalize_edits(edits, state["component_name"],
                                    usecase=state["current_usecase"],
-                                   module_names=state.get("module_names") or [])
+                                   module_names=state.get("module_names") or [],
+                                   known_interfaces=state.get("known_interfaces") or [],
+                                   existing_ports=state.get("existing_ports") or {})
             result.update({
                 "new_operations": norm["new_operations"],
                 "new_interfaces": norm["new_interfaces"],
@@ -1200,17 +1275,18 @@ def apply_node(state: DesignState) -> dict:
             print(f"[Apply] interfaces result: {res}", file=sys.stderr)
             errors.extend(res.get("errors") or ([res["error"]] if res.get("error") else []))
 
-        # IBD delta
-        ibd = state.get("ibd_delta", {})
-        if ibd.get("ports"):
-            plan = {
+        # IBD delta (ports and/or links)
+        ibd = state.get("ibd_delta", {}) or {}
+        if ibd.get("ports") or ibd.get("links"):
+            res = create_ibd({
                 "component_name": state["component_name"],
+                "ibd_name"      : state.get("ibd_name", ""),
+                "module_names"  : state.get("module_names") or [],
                 "ports"         : ibd.get("ports", []),
                 "links"         : ibd.get("links", []),
-            }
-            res = create_ibd(plan, r)
-            if res.get("errors"):
-                errors.extend(res["errors"])
+            }, r)
+            print(f"[Apply] IBD result: {res}", file=sys.stderr)
+            errors.extend(res.get("errors") or ([res["error"]] if res.get("error") else []))
 
     except Exception as e:
         import traceback
