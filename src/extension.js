@@ -9,8 +9,9 @@ const express = require('express');
 // ── Paths ────────────────────────────────────────────────────────────────
 // Resolution order (first hit wins):
 //   1. VS Code settings  (rhapsody.toolsRoot / rhapsody.pythonPath / rhapsody.runtimeDir)
-//   2. config.json next to the extension (legacy, written by setup.ps1)
-//   3. Defaults: tools bundled inside the VSIX, managed venv created by
+//   2. Python bundled inside the VSIX (python/python.exe, all packages pre-installed)
+//   3. config.json next to the extension (legacy, written by setup.ps1)
+//   4. Defaults: tools bundled inside the VSIX, managed venv created by
 //      "Rhapsody: Set Up Python Environment", C:\RhapsodyAIAgent_runtime
 const os = require('os');
 const IS_WIN = process.platform === 'win32';
@@ -38,10 +39,14 @@ const MANAGED_VENV = path.join(
     'RhapsodyAIAgent', '.venv');
 const venvPython = venv => IS_WIN ? path.join(venv, 'Scripts', 'python.exe') : path.join(venv, 'bin', 'python');
 
+// Self-contained Python + all packages shipped inside the VSIX (scripts/bundle_python.py).
+const BUNDLED_PYTHON = path.join(EXT_DIR, 'python', IS_WIN ? 'python.exe' : 'bin/python3');
+
 // Re-resolved on every call so a freshly created venv is picked up without a reload.
 function getPython() {
     const fromSetting = setting('pythonPath');
     if (fromSetting) return fromSetting;
+    if (fs.existsSync(BUNDLED_PYTHON)) return BUNDLED_PYTHON;
     const legacy = readLegacyConfig().python_path;
     if (legacy && fs.existsSync(legacy)) return legacy;
     for (const venv of [MANAGED_VENV, path.join(ROOT_DIR, '.venv')]) {

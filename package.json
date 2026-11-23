@@ -86,7 +86,8 @@
     ]
   },
   "scripts": {
-    "package": "vsce package --skip-license",
+    "bundle-python": "python scripts/bundle_python.py",
+    "package": "vsce package --skip-license --target win32-x64",
     "test": "echo no test"
   },
   "author": "JIO2KOR",
