@@ -241,8 +241,9 @@ def create_ibd(plan, rhapsody=None):
 
     placed = {}   # holder guid -> ports placed so far (for stacking)
 
-    def draw_port(port, mod_cls):
-        boxes = holder_ges(mod_cls)
+    def draw_port(port, mod_cls, boxes=None):
+        if boxes is None:
+            boxes = holder_ges(mod_cls)
         if ibd is not None and not boxes:
             errors.append(f"IBD: {mod_cls.name} (or a part of it) is not on {ibd.name} - "
                           f"port {port.name} not drawn")
@@ -324,17 +325,13 @@ def create_ibd(plan, rhapsody=None):
     except Exception:
         pass
 
-    def resolve_end(obj, port_name):
-        """→ (part or None for boundary, port) or raises ValueError."""
+    def is_component_name(obj):
         obj = (obj or "").strip()
-        if comp_cls is not None and obj in ("", component_name, comp_cls.name):
-            # boundary port of the SW component — unless the port belongs to a
-            # module with the same name as the component (common in AB12)
-            pt = find_port(comp_cls, port_name)
-            if pt is not None:
-                return None, pt
-            if not obj:
-                raise ValueError(f"port '{port_name}' not found on component {comp_cls.name}")
+        return comp_cls is not None and obj in ("", component_name, comp_cls.name)
+
+    def resolve_part_end(obj, port_name):
+        """→ (part, port) for a part / module-typed end, or raises ValueError."""
+        obj = (obj or "").strip()
         part = part_by_name.get(obj)
         if part is None:
             typed = parts_by_type.get(obj, [])
@@ -348,6 +345,77 @@ def create_ibd(plan, rhapsody=None):
         if pt is None:
             raise ValueError(f"port '{port_name}' not found on {part.otherClass.name}")
         return part, pt
+
+    def ensure_boundary_port(port_name, inner_port):
+        """Boundary port on the SW component delegating to `inner_port`: reuse it,
+        or create it with the same interfaces and stereotypes and draw it on the
+        component's box."""
+        pt = find_port(comp_cls, port_name)
+        if pt is not None:
+            return pt
+        try:
+            pt = comp_cls.addNewAggr("Port", port_name)
+        except Exception as e:
+            raise ValueError(f"could not create boundary port {port_name} on "
+                             f"{comp_cls.name}: {e}")
+        try: pt.addNewAggr("Tag", "LLMGenerated")
+        except Exception: pass
+        try:
+            sts = inner_port.stereotypes
+            for k in range(1, sts.Count + 1):
+                pt.addSpecificStereotype(sts.Item(k))
+        except Exception:
+            pass
+        for kind, coll in (("provided", "providedInterfaces"), ("required", "requiredInterfaces")):
+            try:
+                c = getattr(inner_port, coll)
+                for k in range(1, c.Count + 1):
+                    ok, msg = contract_interface(pt, c.Item(k), kind)
+                    (results["interfaces_contracted"] if ok else errors).append(msg)
+            except Exception:
+                pass
+        results["ports_created"].append(f"{comp_cls.name}.{port_name} (boundary)")
+        print(f"[IBD] Created boundary port: {comp_cls.name}.{port_name}")
+        if ibd is not None:
+            draw_port(pt, comp_cls, boxes=_ges(ibd, comp_cls))
+        return pt
+
+    def resolve_ends(link_def):
+        """→ (p1, pt1, p2, pt2); part None = SW component boundary port.
+
+        A component-named end ("rb_x_Comp") is the BOUNDARY when the component
+        has that port, or when the other end is the part of a module with the
+        same name (delegation, e.g. rb_x_Comp.XPrt -- itsRb_x_Comp.XPrt). A
+        missing boundary port is then created like the inner port."""
+        fo, fp = link_def.get("from_obj"), link_def.get("from_port")
+        to, tp = link_def.get("to_obj"), link_def.get("to_port")
+        f_comp, t_comp = is_component_name(fo), is_component_name(to)
+        if f_comp and t_comp and (fo or "").strip() == (to or "").strip():
+            # both ends name the component: a boundary <-> same-named module case
+            # cannot be told apart reliably — require the part name on one side
+            pt_f = find_port(comp_cls, fp)
+            if pt_f is not None:
+                part, ppt = resolve_part_end(to, tp)
+                return None, pt_f, part, ppt
+            raise ValueError("both ends name the component - name the part (e.g. its...) on one side")
+        if not f_comp and not t_comp:
+            p1, pt1 = resolve_part_end(fo, fp)
+            p2, pt2 = resolve_part_end(to, tp)
+            return p1, pt1, p2, pt2
+        # exactly one end names the component
+        c_obj, c_port, o_obj, o_port, comp_first = (fo, fp, to, tp, True) if f_comp else (to, tp, fo, fp, False)
+        other_part, other_pt = resolve_part_end(o_obj, o_port)
+        boundary = find_port(comp_cls, c_port)
+        if boundary is None:
+            try:
+                c_part, c_pt = resolve_part_end(c_obj, c_port)
+            except ValueError:
+                c_part = None
+            if c_part is not None and c_part.name != other_part.name:
+                # genuinely the same-named module's part (part <-> part)
+                return (c_part, c_pt, other_part, other_pt) if comp_first else (other_part, other_pt, c_part, c_pt)
+            boundary = ensure_boundary_port(c_port, other_pt)   # delegation intended
+        return (None, boundary, other_part, other_pt) if comp_first else (other_part, other_pt, None, boundary)
 
     existing_links = []
     if comp_cls is not None:
@@ -381,8 +449,7 @@ def create_ibd(plan, rhapsody=None):
             errors.append(f"Connector {label}: SW component class not found")
             continue
         try:
-            p1, pt1 = resolve_end(link_def.get("from_obj"), link_def.get("from_port"))
-            p2, pt2 = resolve_end(link_def.get("to_obj"), link_def.get("to_port"))
+            p1, pt1, p2, pt2 = resolve_ends(link_def)
         except ValueError as e:
             errors.append(f"Connector {label}: {e}")
             continue

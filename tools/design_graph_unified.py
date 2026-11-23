@@ -278,6 +278,10 @@ Rules:
   (e.g. itsRb_...) or module class names; for a port on the SW component boundary use
   the component name "{component}". Only propose connectors that are really needed;
   both ports must exist or be proposed above
+- Delegation (component boundary <-> module): from_obj = "{component}" (the SW component),
+  to_obj = the module's PART name from the IBD (e.g. itsRb_...), never the module class name
+  on both sides. Only expose an interface on the component boundary when it is used
+  outside the component; a missing boundary port is created with the module port's interfaces
 
 Respond ONLY with valid JSON:
 {{
