@@ -188,6 +188,8 @@ Rules:
 - Use existing types from BDD — do NOT invent new types
 - For each action in the AD, map it to an existing or new operation
 - New functionality: map each new action to exactly ONE module (1 action → 1 module)
+- Every operation (also inside "new_interfaces") MUST be a JSON object with "name",
+  "return_type" and "arguments" — never a signature string
 
 Respond ONLY with valid JSON:
 {{
@@ -207,7 +209,13 @@ Respond ONLY with valid JSON:
     {{
       "name": "rb_<moduleShortName>_<InterfaceName>Intf",
       "stereotypes": ["Interface"],
-      "operations": [],
+      "operations": [
+        {{
+          "name": "rb_<prefix>_GetSomething",
+          "return_type": "<existing_type>",
+          "arguments": [{{"name": "param_name", "type": "<existing_type>"}}]
+        }}
+      ],
       "attributes": [],
       "realized_by": "{usecase}"
     }}
@@ -811,9 +819,13 @@ def design_elements_prompt_node(state: DesignState) -> dict:
 
 
 def design_elements_parse_node(state: DesignState) -> dict:
+    from plan_normalize import normalize_operations, normalize_classes
     result    = extract_json(state["llm_response"], default={})
-    new_ops   = result.get("new_operations", [])
-    new_intfs = result.get("new_interfaces", [])
+    if not isinstance(result, dict):
+        result = {}
+    # LLM sometimes returns operations as signature strings — convert to dicts
+    new_ops   = normalize_operations(result.get("new_operations", []))
+    new_intfs = normalize_classes(result.get("new_interfaces", []))
     for op in new_ops:
         op["usecase"] = state["current_usecase"]
     print(f"[DesignElements] Ops: {len(new_ops)}, Intfs: {len(new_intfs)}")

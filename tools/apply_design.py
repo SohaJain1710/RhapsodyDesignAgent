@@ -55,8 +55,9 @@ def normalize_edits(edits: dict, component_name: str, usecase: str = "") -> dict
     - bdd_delta is (re)built so the selected interfaces are actually created
     """
     usecase    = usecase or edits.get("usecase", "")
-    new_ops    = [dict(o) for o in edits.get("new_operations", []) or []]
-    new_intfs  = [dict(i) for i in edits.get("new_interfaces", []) or []]
+    from plan_normalize import normalize_operations, normalize_classes
+    new_ops    = normalize_operations(edits.get("new_operations", []))
+    new_intfs  = normalize_classes(edits.get("new_interfaces", []))
     realizations = None
 
     static_view = (edits.get("static_view") or "").strip()

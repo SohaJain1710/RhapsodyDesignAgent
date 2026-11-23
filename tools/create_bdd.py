@@ -557,7 +557,8 @@ def create_bdd_from_plan(plan: dict, rhapsody=None, diagram_name: str = None) ->
 
     elements = []
 
-    for cls_def in plan.get("classes", []):
+    from plan_normalize import normalize_classes
+    for cls_def in normalize_classes(plan.get("classes", [])):
         name = cls_def.get("name", "")
         # Search dd_pkg first to get module class, not component class
         cls = find_class_recursive(dd_pkg, name) or find_class_recursive(comp_pkg, name)
@@ -611,6 +612,9 @@ def create_bdd_from_plan(plan: dict, rhapsody=None, diagram_name: str = None) ->
         elements.append({"type": "class_obj", "cls": cls, "name": name, "w": 172, "h": 139})
 
     for real in plan.get("realizations", []):
+        if not isinstance(real, dict) or not real.get("specific") or not real.get("general"):
+            print(f"[BDD] Skipping malformed realization: {real!r}")
+            continue
         specific, general = real.get("specific",""), real.get("general","")
         # Search dd_pkg first for module class
         from_cls = find_class_recursive(dd_pkg, specific) or find_class_recursive(comp_pkg, specific)
@@ -619,6 +623,9 @@ def create_bdd_from_plan(plan: dict, rhapsody=None, diagram_name: str = None) ->
                          "from_cls": from_cls, "to_cls": to_cls})
 
     for gen in plan.get("generalizations", []):
+        if not isinstance(gen, dict) or not gen.get("specific") or not gen.get("general"):
+            print(f"[BDD] Skipping malformed generalization: {gen!r}")
+            continue
         specific, general = gen.get("specific",""), gen.get("general","")
         from_cls = find_class_recursive(dd_pkg, specific) or find_class_recursive(comp_pkg, specific)
         to_cls   = find_class_recursive(dd_pkg, general)  or find_class_recursive(comp_pkg, general)
