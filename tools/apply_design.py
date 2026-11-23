@@ -54,7 +54,8 @@ def _parse_static_view(static_view: str, component_name: str,
 
 def normalize_edits(edits: dict, component_name: str, usecase: str = "",
                     module_names: list = None, known_interfaces: list = None,
-                    existing_ports: dict = None) -> dict:
+                    existing_ports: dict = None, module_members: dict = None,
+                    interface_ops: dict = None) -> dict:
     """Normalize the design-review webview payload into graph/apply state fields.
 
     - new_operations / new_interfaces / ibd_delta / op_ads / updated_ad / req_map as sent
@@ -85,7 +86,8 @@ def normalize_edits(edits: dict, component_name: str, usecase: str = "",
         except Exception as e:
             print(f"[Edits] Static View parse failed, using form values: {e}", file=sys.stderr)
 
-    v = validate_design(new_ops, new_intfs, realizations, module_names, component_name)
+    v = validate_design(new_ops, new_intfs, realizations, module_names, component_name,
+                        module_members or {}, interface_ops or {})
     for w in v["warnings"]:
         print(f"[Edits] WARNING: {w}", file=sys.stderr)
     new_ops, new_intfs = v["new_operations"], v["new_interfaces"]

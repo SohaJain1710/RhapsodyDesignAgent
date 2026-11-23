@@ -147,8 +147,13 @@ def default_module(module_names: list, component_name: str = "") -> str | None:
 
 
 def validate_design(new_ops: list, new_intfs: list, realizations: list,
-                    module_names: list, component_name: str = "") -> dict:
-    """Make every operation owner and every realizer a known module class.
+                    module_names: list, component_name: str = "",
+                    module_members: dict = None, interface_ops: dict = None) -> dict:
+    """Make every operation owner and every realizer a known module class, and
+    make every realizing module implement the operations of its interfaces.
+
+    module_members : {module: {"operations": ["name(args) ret", ...]}} existing members
+    interface_ops  : {interface: [op dicts]} operations of EXISTING interfaces
 
     Returns {"new_operations", "new_interfaces", "realizations", "warnings"}.
     """
@@ -212,8 +217,43 @@ def validate_design(new_ops: list, new_intfs: list, realizations: list,
             continue
         add(mod, general)
 
+    _mirror_interface_ops(ops, intfs, reals, module_members or {},
+                          interface_ops or {}, warnings)
+
     return {"new_operations": ops, "new_interfaces": intfs,
             "realizations": reals, "warnings": warnings}
+
+
+def _existing_op_names(module_members: dict, module: str) -> set:
+    sigs = (module_members.get(module) or {}).get("operations", []) or []
+    return {str(s).split("(", 1)[0].strip() for s in sigs}
+
+
+def _mirror_interface_ops(ops: list, intfs: list, reals: list, module_members: dict,
+                          interface_ops: dict, warnings: list) -> None:
+    """Every operation of a realized interface must also exist on the realizing
+    module (the implementation, where its Operation AD is drawn). Missing ones
+    are added to `ops` as new public operations of that module."""
+    intf_by_name = {i["name"]: i for i in intfs}
+    for r in reals:
+        mod, intf = r["specific"], r["general"]
+        declared = (intf_by_name[intf].get("operations") if intf in intf_by_name
+                    else normalize_operations(interface_ops.get(intf, [])))
+        have = _existing_op_names(module_members, mod) | {o["name"] for o in ops if o.get("module") == mod}
+        added = []
+        for iop in declared or []:
+            if iop["name"] in have:
+                continue
+            new = {k: v for k, v in iop.items() if k not in ("stereotypes",)}
+            new.update({"module": mod, "visibility": "public", "implements": f"{intf}.{iop['name']}",
+                        "rationale": f"Implements {intf}.{iop['name']} (interface realized by {mod})"})
+            new.setdefault("req_ids", [])
+            ops.append(new)
+            have.add(iop["name"])
+            added.append(iop["name"])
+        if added:
+            warnings.append(f"Added {len(added)} operation(s) to {mod} to implement {intf}: "
+                            f"{', '.join(added)}")
 
 
 def build_bdd_plans(component_name: str, new_ops: list, new_intfs: list,
@@ -223,7 +263,8 @@ def build_bdd_plans(component_name: str, new_ops: list, new_intfs: list,
     by_module: dict = {}
     for op in new_ops or []:
         mod = op.get("module") or component_name
-        clean = {k: v for k, v in op.items() if k not in ("module", "usecase", "req_ids", "rationale")}
+        clean = {k: v for k, v in op.items()
+                 if k not in ("module", "usecase", "req_ids", "rationale", "implements")}
         by_module.setdefault(mod, []).append(clean)
     op_plans = [{
         "component_name": component_name,

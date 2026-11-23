@@ -77,6 +77,7 @@ class DesignState(TypedDict):
     existing_ports   : dict        # {module: {port: {provided, required}}}
     unexposed_ops    : list        # "module.op" public operations not offered by any interface
     module_members   : dict        # {module: {operations: [...], attributes: [...]}}
+    interface_ops    : dict        # {existing interface: [operation dicts]}
     op_ads_replace   : list        # op names whose AD the reviewer edited (replace existing AD)
 
     # Shared LLM bus
@@ -210,6 +211,9 @@ Rules:
   used by this use case: propose a new interface (in "new_interfaces", with those
   operations) or add them to a fitting existing interface, plus the realization.
   Operations used only inside their own module stay private and need no interface
+- Every operation of an interface must ALSO exist on the module that realizes it (that is
+  where it is implemented and its Operation AD is drawn): list those module operations in
+  "new_operations" too, unless the module already has them
 - Interfaces are realized ONLY by a module class from the Module Classes list above:
   "realized_by" and every realizations "specific" MUST be one of those module names.
   NEVER use the use case name, the SW component, or an actor as realizer.
@@ -759,6 +763,22 @@ def _module_members(bdds: list, module_names: list) -> dict:
     return out
 
 
+def _interface_ops(bdds: list, module_names: list) -> dict:
+    """{interface: [operation dicts]} for the interfaces shown on the BDDs."""
+    out = {}
+    for bdd in bdds:
+        for c in bdd.get("classes", []):
+            if c["name"] in module_names or c.get("role") in ("component", "module", "config"):
+                continue
+            if c["name"].endswith(("Intf", "If")) or any(
+                    "interface" in st.lower() for st in c.get("stereotypes", []) or []):
+                ops = out.setdefault(c["name"], [])
+                for op in c.get("operations", []) or []:
+                    if all(o["name"] != op["name"] for o in ops):
+                        ops.append({k: op.get(k) for k in ("name", "arguments", "return_type")})
+    return out
+
+
 def _unexposed_public_ops(bdds: list, module_names: list) -> list:
     """Public operations of the module classes that no interface on the BDDs offers."""
     offered, public = set(), {}
@@ -856,6 +876,7 @@ def read_context_node(state: DesignState) -> dict:
             p, dd_pkg, comp_pkg, bdds_dd + bdds_intf)
         unexposed = _unexposed_public_ops(bdds_dd + bdds_intf, module_names)
         module_members = _module_members(bdds_dd + bdds_intf, module_names)
+        interface_ops  = _interface_ops(bdds_dd + bdds_intf, module_names)
         print(f"[Context] Public module operations not in any interface: {len(unexposed)}")
         print(f"[Context] Modules: {module_names} | interface stereotypes: "
               f"{intf_stereotypes} | interface package: {intf_pkg or dd_pkg.name}")
@@ -897,6 +918,7 @@ def read_context_node(state: DesignState) -> dict:
             "known_interfaces": list(dict.fromkeys(intf_names + unrealized.get("all_interfaces", []))),
             "unexposed_ops"  : unexposed,
             "module_members" : module_members,
+            "interface_ops"  : interface_ops,
             "ibd_name"       : ibd_name,
             "existing_ports" : existing_ports,
         }
@@ -1077,7 +1099,9 @@ def design_elements_parse_node(state: DesignState) -> dict:
                         result.get("new_interfaces", []),
                         result.get("realizations", []),
                         state.get("module_names") or [],
-                        state["component_name"])
+                        state["component_name"],
+                        state.get("module_members") or {},
+                        state.get("interface_ops") or {})
     new_ops, new_intfs = v["new_operations"], v["new_interfaces"]
     for op in new_ops:
         op["usecase"] = state["current_usecase"]
@@ -1300,7 +1324,9 @@ def human_review_node(state: DesignState) -> dict:
                                    usecase=state["current_usecase"],
                                    module_names=state.get("module_names") or [],
                                    known_interfaces=state.get("known_interfaces") or [],
-                                   existing_ports=state.get("existing_ports") or {})
+                                   existing_ports=state.get("existing_ports") or {},
+                                   module_members=state.get("module_members") or {},
+                                   interface_ops=state.get("interface_ops") or {})
             result.update({
                 "new_operations": norm["new_operations"],
                 "new_interfaces": norm["new_interfaces"],

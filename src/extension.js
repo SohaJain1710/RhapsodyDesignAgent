@@ -790,7 +790,8 @@ function render() {
         item.appendChild(cb);
         const det = el('div', 'details');
         det.appendChild(el('div', 'title', '<code>' + esc(op.name) + '</code><span class="badge-new">NEW</span>'));
-        det.appendChild(el('div', 'meta', 'Returns: <code>' + esc(op.return_type||'void') + '</code> | ' + esc(op.visibility||'public') + ' | ' + esc((op.req_ids||[]).join(', '))));
+        det.appendChild(el('div', 'meta', 'Returns: <code>' + esc(op.return_type||'void') + '</code> | ' + esc(op.visibility||'public') + ' | ' + esc((op.req_ids||[]).join(', ')) +
+            (op.implements ? ' | implements <code>' + esc(op.implements) + '</code>' : '')));
         const fields = el('div', 'fields');
         fields.appendChild(field('Name',        inp(op.name,            v => renameOp(i, v), '160px')));
         fields.appendChild(field('Return Type', inp(op.return_type||'void', v => S.new_operations[i].return_type = v, '100px')));
