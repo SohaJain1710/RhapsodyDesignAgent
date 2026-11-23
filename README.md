@@ -5,7 +5,8 @@ A VS Code chat participant (`@rhapsody`) that generates Detailed Design artifact
 
 ## Install
 
-1. Download `rhapsody-design-assistant-<version>.vsix`.
+1. Download `rhapsody-design-assistant-<version>.vsix` from the repo's **Releases** page
+   (or, for an untagged build, from **Actions → Build VSIX → a run → Artifacts**).
 2. In VS Code: **Extensions** view → `…` menu → **Install from VSIX…**, or run:
    ```
    code --install-extension rhapsody-design-assistant-0.0.3.vsix
@@ -39,6 +40,17 @@ In the Copilot Chat panel:
 | `rhapsody.toolsRoot` | Use a `tools/` folder from a repo checkout instead of the bundled one |
 
 ## Building the VSIX
+
+GitHub Actions (`.github/workflows/build-vsix.yml`) builds the VSIX on every push. To publish a release:
+
+```
+git tag v0.0.4
+git push origin v0.0.4
+```
+
+The tag sets the extension version, and the VSIX is attached to a new GitHub Release.
+
+To build locally:
 
 ```
 npm install
