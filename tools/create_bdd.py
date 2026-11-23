@@ -38,7 +38,7 @@ def find_package_recursive(parent, name, depth=0, max_depth=12):
             if pkg.name == name:
                 return pkg
             r = find_package_recursive(pkg, name, depth+1)
-            if r:
+            if r is not None:
                 return r
     except:
         pass
@@ -59,7 +59,7 @@ def find_class_recursive(parent, name, depth=0, max_depth=12):
         for i in range(1, parent.packages.Count + 1):
             pkg = parent.packages.Item(i)
             r = find_class_recursive(pkg, name, depth+1)
-            if r:
+            if r is not None:
                 return r
     except:
         pass
@@ -131,7 +131,7 @@ def find_stereotype_object(project, name):
             for i in range(1, parent.packages.Count + 1):
                 pkg = parent.packages.Item(i)
                 result = search(pkg, depth+1)
-                if result:
+                if result is not None:
                     return result
         except:
             pass
@@ -139,12 +139,218 @@ def find_stereotype_object(project, name):
     return search(project)
 
 
+# ── Shared helpers ────────────────────────────────────────────────────────────
+# NOTE: COM objects are compared with "is None" — a COM object can evaluate as
+# False in Python (e.g. through a default Count property), which silently
+# skipped classes/edges when written as "if not obj".
+
+REALIZATION_GUID = "GUID 122837c0-ef70-11d4-a08b-00d0b780aafd"
+_stereo_cache: dict = {}
+
+
+def _guid(elem) -> str:
+    try:
+        return str(elem.GUID)
+    except Exception:
+        return ""
+
+
+def _project_stereotypes(project) -> list:
+    key = _guid(project) or id(project)
+    if key not in _stereo_cache:
+        found = []
+        try:
+            nested = project.getNestedElementsByMetaClass("Stereotype", 1)
+            for i in range(1, nested.Count + 1):
+                found.append(nested.Item(i))
+        except Exception as e:
+            print(f"[BDD] Could not list stereotypes: {e}")
+        _stereo_cache[key] = found
+    return _stereo_cache[key]
+
+
+def find_project_stereotype(project, name: str, guid: str = None):
+    """Stereotype by GUID (preferred) or by name."""
+    by_name = None
+    for st in _project_stereotypes(project):
+        try:
+            if guid and st.GUID == guid:
+                return st
+            if by_name is None and st.name == name:
+                by_name = st
+        except Exception:
+            pass
+    return by_name
+
+
+def apply_stereotype(elem, project, name: str) -> bool:
+    st = find_project_stereotype(project, name)
+    if st is None:
+        return False
+    try:
+        elem.addSpecificStereotype(st)
+        return True
+    except Exception as e:
+        print(f"[BDD] addSpecificStereotype({name}) failed: {e}")
+        return False
+
+
+def _find_generalization(from_cls, to_cls, to_name):
+    try:
+        gens = from_cls.generalizations
+        for i in range(1, gens.Count + 1):
+            g = gens.Item(i)
+            try:
+                base = g.baseClass
+                if (to_cls is not None and _guid(base) and _guid(base) == _guid(to_cls)) \
+                        or base.name == to_name:
+                    return g
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
+
+
+def ensure_generalization(from_cls, to_cls, to_name, realization: bool, project, errors: list):
+    """Find or create the generalization from_cls → to_cls; for realizations make
+    sure the «Realization» stereotype is applied (else it would be inheritance)."""
+    gen = _find_generalization(from_cls, to_cls, to_name)
+    if gen is None:
+        if to_cls is None:
+            errors.append(f"Edge {from_cls.name}->{to_name}: target class not found")
+            return None
+        try:
+            from_cls.addGeneralization(to_cls)
+            print(f"[BDD] Created {'realization' if realization else 'generalization'}: "
+                  f"{from_cls.name} -> {to_name}")
+        except Exception as e:
+            errors.append(f"Edge {from_cls.name}->{to_name}: addGeneralization failed: {e}")
+            return None
+        gen = _find_generalization(from_cls, to_cls, to_name)
+        if gen is None:
+            errors.append(f"Edge {from_cls.name}->{to_name}: created but not found")
+            return None
+    if realization:
+        try:
+            has = any(gen.stereotypes.Item(i).name == "Realization"
+                      for i in range(1, gen.stereotypes.Count + 1))
+        except Exception:
+            has = False
+        if not has:
+            st = find_project_stereotype(project, "Realization", guid=REALIZATION_GUID)
+            if st is None:
+                errors.append(f"Edge {from_cls.name}->{to_name}: «Realization» stereotype not "
+                              f"found - drawn as generalization")
+            else:
+                try:
+                    gen.addSpecificStereotype(st)
+                    print(f"[BDD] Applied Realization stereotype")
+                except Exception as e:
+                    errors.append(f"Edge {from_cls.name}->{to_name}: Realization stereotype failed: {e}")
+    return gen
+
+
+def ge_for(diag, element):
+    """Graphic element of a model element in a diagram (or None)."""
+    try:
+        ges = diag.getCorrespondingGraphicElements(element)
+        if ges is not None and ges.Count > 0:
+            return ges.Item(1)
+    except Exception:
+        pass
+    return None
+
+
+def _draw_edge(diag, gen, from_ge, to_ge, label, errors):
+    if ge_for(diag, gen) is not None:
+        return                      # already drawn
+    try:
+        diag.AddNewEdgeForElement(gen, from_ge, 0, 0, to_ge, 0, 0)
+        print(f"[BDD] Edge: {label}")
+        e = ge_for(diag, gen)
+        if e is not None:
+            try: e.setGraphicalProperty("ShowStereotype", "True")
+            except Exception: pass
+    except Exception as e:
+        errors.append(f"Edge {label}: AddNewEdgeForElement failed: {e}")
+
+
+def _resolve(elem, key, dd_pkg, project, name):
+    obj = elem.get(key)
+    if obj is None:
+        obj = find_class_recursive(dd_pkg, name)
+    if obj is None and project is not None:
+        obj = find_class_recursive(project, name)
+    return obj
+
+
+def _draw_nodes(diag, elements, dd_pkg, project, errors, x, y, hide_ports):
+    """Draw class nodes not yet in the diagram. Returns {guid: ge}."""
+    ROW_H, MAX_COLS = 200, 5
+    col, x0 = 0, x
+    for elem in elements:
+        if elem.get("type") not in ("class", "class_obj"):
+            continue
+        name = elem["name"]
+        cls = _resolve(elem, "cls", dd_pkg, project, name)
+        if cls is None:
+            errors.append(f"Class not found: {name}")
+            continue
+        if ge_for(diag, cls) is not None:
+            print(f"[BDD] Class already in diagram: {name}")
+            continue
+        w, h = elem.get("w", 172), elem.get("h", 139)
+        try:
+            ge = diag.AddNewNodeForElement(cls, x, y, w, h)
+            if hide_ports:
+                try: ge.hideAllPorts()
+                except Exception as hp_e: print(f"[BDD] hideAllPorts failed for {name}: {hp_e}")
+            try: ge.setGraphicalProperty("FillColor", "255,255,0")
+            except Exception: pass
+            print(f"[BDD] Added class: {name} at ({x},{y})")
+        except Exception as e:
+            errors.append(f"AddNewNodeForElement failed for {name}: {e}")
+            continue
+        col += 1
+        x   += w + 30
+        if col >= MAX_COLS:
+            col, x, y = 0, x0, y + ROW_H
+
+
+def _draw_edges(diag, elements, dd_pkg, project, errors):
+    for elem in elements:
+        etype = elem.get("type")
+        if etype not in ("generalization", "realization"):
+            continue
+        from_name, to_name = elem.get("from", ""), elem.get("to", "")
+        label = f"{from_name} -> {to_name}"
+        from_cls = _resolve(elem, "from_cls", dd_pkg, project, from_name)
+        to_cls   = _resolve(elem, "to_cls",   dd_pkg, project, to_name)
+        if from_cls is None:
+            errors.append(f"Edge {label}: source class not found")
+            continue
+        gen = ensure_generalization(from_cls, to_cls, to_name, etype == "realization",
+                                    project, errors)
+        if gen is None:
+            continue
+        # Look up the boxes by MODEL ELEMENT, not by name: the SW component and
+        # its module often share a name
+        from_ge = ge_for(diag, from_cls)
+        to_ge   = ge_for(diag, to_cls) if to_cls is not None else None
+        if from_ge is None or to_ge is None:
+            errors.append(f"Edge {label}: created in the model but "
+                          f"{'source' if from_ge is None else 'target'} is not on diagram {diag.name}")
+            continue
+        _draw_edge(diag, gen, from_ge, to_ge, label, errors)
+
+
 # ── BDD Creator ───────────────────────────────────────────────────────────────
 
 def create_bdd(dd_pkg, bdd_name: str, elements: list,
                rhapsody=None, project=None) -> dict:
     """
-    Creates a BDD (ObjectModelDiagram) in dd_pkg.
+    Creates (re-creates) a BDD (ObjectModelDiagram) in dd_pkg.
 
     elements = [
         {"type": "class",         "name": "rb_sdm_SafeDataMgt",    "w": 172, "h": 139},
@@ -152,12 +358,7 @@ def create_bdd(dd_pkg, bdd_name: str, elements: list,
     ]
     """
     print(f"[BDD] Creating: {bdd_name}")
-    errors  = []
-    ge_map   = {}   # name -> ge
-    added_ids = set()  # track by GUID to avoid duplicates
-
-    # ── 1. Create diagram ─────────────────────────────────────────────────────
-    # Check if diagram already exists — delete and recreate
+    errors = []
     try:
         for i in range(1, dd_pkg.objectModelDiagrams.Count + 1):
             existing = dd_pkg.objectModelDiagrams.Item(i)
@@ -165,7 +366,7 @@ def create_bdd(dd_pkg, bdd_name: str, elements: list,
                 existing.deleteFromProject()
                 print(f"[BDD] Deleted existing: {bdd_name}")
                 break
-    except: pass
+    except Exception: pass
 
     try:
         diag = dd_pkg.addObjectModelDiagram(bdd_name)
@@ -174,197 +375,30 @@ def create_bdd(dd_pkg, bdd_name: str, elements: list,
         return {"success": False, "diagram_name": bdd_name,
                 "errors": [f"addObjectModelDiagram failed: {e}"]}
 
-    # ── 2. Add class GEs ──────────────────────────────────────────────────────
-    x, y = 50, 50
-    ROW_H = 200
-    col   = 0
-    MAX_COLS = 5
+    _draw_nodes(diag, elements, dd_pkg, project, errors, 50, 50, hide_ports=True)
+    _draw_edges(diag, elements, dd_pkg, project, errors)
 
-    for elem in elements:
-        if elem.get("type") not in ("class", "class_obj"):
-            continue
-        name  = elem["name"]
-        w     = elem.get("w", 172)
-        h     = elem.get("h", 139)
-
-        # Use pre-resolved class object if provided
-        if elem.get("type") == "class_obj":
-            cls = elem.get("cls")
-        else:
-            cls = find_class_recursive(dd_pkg, name)
-            if not cls:
-                cls = find_class_recursive(project, name) if project else None
-
-        if not cls:
-            errors.append(f"Class not found: {name}")
-            print(f"[BDD] Class not found: {name}")
-            continue
-
-        # Skip duplicates by GUID
-        try:
-            cls_guid = cls.GUID
-            if cls_guid in added_ids:
-                print(f"[BDD] Skip duplicate: {name}")
-                continue
-            added_ids.add(cls_guid)
-        except: pass
-
-        try:
-            ge = diag.AddNewNodeForElement(cls, x, y, w, h)
-            ge_map[name] = ge
-            # Hide ports to keep BDD blocks clean (matches reference diagrams)
-            try:
-                ge.hideAllPorts()
-            except Exception as hp_e:
-                print(f"[BDD] hideAllPorts failed for {name}: {hp_e}")
-            print(f"[BDD] Added class: {name} at ({x},{y})")
-            try: ge.setGraphicalProperty("FillColor", "255,255,0")
-            except: pass
-        except Exception as e:
-            errors.append(f"AddNewNodeForElement failed for {name}: {e}")
-            print(f"[BDD] Draw failed for {name}: {e}")
-            continue
-
-        # Layout — grid, spacing based on this element's actual width + margin
-        col += 1
-        x   += w + 30
-        if col >= MAX_COLS:
-            col = 0
-            x   = 50
-            y  += ROW_H
-
-    # ── 3. Add generalization/realization edges ────────────────────────────────
-    for elem in elements:
-        if elem.get("type") not in ("generalization", "realization"):
-            continue
-        from_name = elem.get("from", "")
-        to_name   = elem.get("to", "")
-        from_ge   = ge_map.get(from_name)
-        to_ge     = ge_map.get(to_name)
-
-        if not from_ge or not to_ge:
-            print(f"[BDD] Skip edge {from_name}->{to_name}: GE missing")
-            continue
-
-        # Use pre-resolved class object if provided (avoids duplicate-name bugs)
-        from_cls = elem.get("from_cls")
-        if not from_cls:
-            from_cls = find_class_recursive(dd_pkg, from_name)
-            if not from_cls:
-                from_cls = find_class_recursive(project, from_name) if project else None
-
-        if not from_cls:
-            errors.append(f"Class not found for edge: {from_name}")
-            continue
-
-        try:
-            gen = None
-
-            # Use baseClass property (NOT .to — that always throws)
-            try:
-                gens = from_cls.generalizations
-                for i in range(1, gens.Count + 1):
-                    g = gens.Item(i)
-                    try:
-                        if g.baseClass.name == to_name:
-                            gen = g
-                            break
-                    except: pass
-            except: pass
-
-            # Create new generalization only if truly not found
-            if not gen:
-                to_cls = elem.get("to_cls")
-                if not to_cls:
-                    to_cls = find_class_recursive(dd_pkg, to_name)
-                if not to_cls and project:
-                    to_cls = find_class_recursive(project, to_name)
-                if to_cls:
-                    try:
-                        from_cls.addGeneralization(to_cls)
-                        print(f"[BDD] Created generalization: {from_name} -> {to_name}")
-                    except Exception as e2:
-                        print(f"[BDD] Create generalization failed: {e2}")
-                    # Re-fetch using baseClass property
-                    try:
-                        gens3 = from_cls.generalizations
-                        for i in range(1, gens3.Count + 1):
-                            g3 = gens3.Item(i)
-                            try:
-                                if g3.baseClass.name == to_name:
-                                    gen = g3
-                                    break
-                            except: pass
-                    except: pass
-                    # Apply Realization stereotype if edge type is realization
-                    if gen and elem.get("type") == "realization":
-                        try:
-                            nested = project.getNestedElementsByMetaClass("Stereotype", 1)
-                            realization_guid = "GUID 122837c0-ef70-11d4-a08b-00d0b780aafd"
-                            for si in range(1, nested.Count + 1):
-                                st = nested.Item(si)
-                                try:
-                                    if st.GUID == realization_guid or \
-                                       (st.name == "Realization" and st.getFullPathName() == "Realization"):
-                                        gen.addSpecificStereotype(st)
-                                        print(f"[BDD] Applied Realization stereotype")
-                                        break
-                                except: pass
-                        except Exception as se:
-                            print(f"[BDD] Stereotype failed: {se}")
-
-            if gen:
-                try:
-                    diag.AddNewEdgeForElement(gen, from_ge, 0, 0, to_ge, 0, 0)
-                    print(f"[BDD] Edge: {from_name} -> {to_name}")
-                    # Try to show stereotype label on the edge
-                    try:
-                        ges = diag.getCorrespondingGraphicElements(gen)
-                        if ges and ges.Count > 0:
-                            ges.Item(1).setGraphicalProperty("ShowStereotype", "True")
-                    except: pass
-                except Exception as e3:
-                    print(f"[BDD] AddNewEdgeForElement failed: {e3}")
-            else:
-                print(f"[BDD] Generalization not found: {from_name} -> {to_name}")
-        except Exception as e:
-            errors.append(f"Edge {from_name}->{to_name} failed: {e}")
-            print(f"[BDD] Edge failed: {e}")
-
-    # ── 4. Save ───────────────────────────────────────────────────────────────
     try:
-        if rhapsody:
+        if rhapsody is not None:
             rhapsody.activeProject().save()
         print(f"[BDD] Saved: {bdd_name}")
     except Exception as e:
         errors.append(f"Save failed: {e}")
 
-    print(f"[BDD] Done: {len(ge_map)} elements drawn, {len(errors)} errors")
-    return {
-        "success"     : len(errors) == 0,
-        "diagram_name": bdd_name,
-        "drawn"       : len(ge_map),
-        "errors"      : errors
-    }
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
+    print(f"[BDD] Done: {len(errors)} errors")
+    return {"success": len(errors) == 0, "diagram_name": bdd_name, "errors": errors}
 
 
 def update_bdd(dd_pkg, bdd_name: str, new_elements: list,
                rhapsody=None, project=None) -> dict:
     """
-    Add new elements to an EXISTING BDD diagram.
-    Only draws nodes/edges for elements not already in the diagram.
-    Places new nodes below existing content.
-
-    new_elements: same format as create_bdd elements list
+    Add new elements to an EXISTING BDD diagram (creates it if missing).
+    Only draws nodes/edges that are not already in the diagram; new nodes are
+    placed below the existing content.
     """
     print(f"[BDD] Updating: {bdd_name}")
-    errors  = []
-    ge_map  = {}   # name -> ge (both existing and new)
+    errors = []
 
-    # Find existing diagram
     diag = None
     try:
         for i in range(1, dd_pkg.objectModelDiagrams.Count + 1):
@@ -373,268 +407,186 @@ def update_bdd(dd_pkg, bdd_name: str, new_elements: list,
                 diag = d
                 print(f"[BDD] Found existing diagram: {bdd_name}")
                 break
-    except: pass
+    except Exception: pass
 
-    if not diag:
+    if diag is None:
         print(f"[BDD] Diagram not found: {bdd_name} — creating new")
         return create_bdd(dd_pkg, bdd_name, new_elements, rhapsody, project)
 
-    # Read existing class nodes and their GEs
-    existing_names = set()
-    existing_class_count = 0
+    existing_classes = 0
     try:
         elems = diag.getElementsInDiagram()
         for i in range(1, elems.Count + 1):
-            e = elems.Item(i)
             try:
-                if e.metaClass == "Class":
-                    existing_names.add(e.name)
-                    existing_class_count += 1
-                    # Get GE for this class
-                    try:
-                        ges = diag.getCorrespondingGraphicElements(e)
-                        if ges.Count > 0:
-                            ge_map[e.name] = ges.Item(1)
-                    except: pass
-            except: pass
-    except: pass
+                if elems.Item(i).metaClass == "Class":
+                    existing_classes += 1
+            except Exception: pass
+    except Exception: pass
+    print(f"[BDD] Existing classes in diagram: {existing_classes}")
 
-    print(f"[BDD] Existing classes: {existing_class_count} — {existing_names}")
-
-    # Place new nodes below existing content
-    # Estimate: each row ~200px high, start after existing content
-    ROW_H    = 200
-    MAX_COLS = 5
-    x = 50
-    y = (existing_class_count // MAX_COLS + 1) * ROW_H + 50
-    col = 0
-
-    # Draw only NEW class nodes
-    for elem in new_elements:
-        if elem.get("type") not in ("class", "class_obj"):
-            continue
-        name = elem["name"]
-
-        if name in existing_names:
-            print(f"[BDD] Class already in diagram: {name}")
-            continue  # GE already in ge_map from above
-
-        # Resolve class object
-        cls = elem.get("cls")
-        if not cls:
-            cls = find_class_recursive(dd_pkg, name)
-            if not cls and project:
-                cls = find_class_recursive(project, name)
-
-        if not cls:
-            errors.append(f"Class not found: {name}")
-            continue
-
-        w = elem.get("w", 172)
-        h = elem.get("h", 139)
-
-        try:
-            ge = diag.AddNewNodeForElement(cls, x, y, w, h)
-            ge_map[name] = ge
-            print(f"[BDD] Added new class: {name} at ({x},{y})")
-            try: ge.setGraphicalProperty("FillColor", "255,255,0")
-            except: pass
-        except Exception as e:
-            errors.append(f"AddNewNodeForElement failed for {name}: {e}")
-            continue
-
-        col += 1
-        x   += w + 30
-        if col >= MAX_COLS:
-            col = 0; x = 50; y += ROW_H
-
-    # Draw edges for all new generalization/realization elements
-    for elem in new_elements:
-        if elem.get("type") not in ("generalization", "realization"):
-            continue
-        from_name = elem.get("from", "")
-        to_name   = elem.get("to", "")
-        from_ge   = ge_map.get(from_name)
-        to_ge     = ge_map.get(to_name)
-
-        if not from_ge or not to_ge:
-            print(f"[BDD] Skip edge {from_name}->{to_name}: GE missing")
-            continue
-
-        from_cls = elem.get("from_cls") or find_class_recursive(dd_pkg, from_name)
-        if not from_cls and project:
-            from_cls = find_class_recursive(project, from_name)
-        if not from_cls:
-            errors.append(f"Class not found for edge: {from_name}")
-            continue
-
-        try:
-            gen = None
-            try:
-                gens = from_cls.generalizations
-                for i in range(1, gens.Count + 1):
-                    g = gens.Item(i)
-                    try:
-                        if g.baseClass.name == to_name:
-                            gen = g; break
-                    except: pass
-            except: pass
-
-            if not gen:
-                to_cls = elem.get("to_cls") or find_class_recursive(dd_pkg, to_name)
-                if not to_cls and project:
-                    to_cls = find_class_recursive(project, to_name)
-                if to_cls:
-                    from_cls.addGeneralization(to_cls)
-                    print(f"[BDD] Created generalization: {from_name} -> {to_name}")
-                    try:
-                        gens = from_cls.generalizations
-                        for i in range(1, gens.Count + 1):
-                            g = gens.Item(i)
-                            try:
-                                if g.baseClass.name == to_name:
-                                    gen = g; break
-                            except: pass
-                    except: pass
-                    # Apply Realization stereotype
-                    if gen and elem.get("type") == "realization":
-                        try:
-                            nested = project.getNestedElementsByMetaClass("Stereotype", 1)
-                            for si in range(1, nested.Count + 1):
-                                st = nested.Item(si)
-                                try:
-                                    if st.name == "Realization" and st.getFullPathName() == "Realization":
-                                        gen.addSpecificStereotype(st); break
-                                except: pass
-                        except: pass
-
-            if gen:
-                try:
-                    diag.AddNewEdgeForElement(gen, from_ge, 0, 0, to_ge, 0, 0)
-                    print(f"[BDD] Edge: {from_name} -> {to_name}")
-                    try:
-                        ges = diag.getCorrespondingGraphicElements(gen)
-                        if ges and ges.Count > 0:
-                            ges.Item(1).setGraphicalProperty("ShowStereotype", "True")
-                    except: pass
-                except Exception as e3:
-                    print(f"[BDD] Edge failed: {e3}")
-        except Exception as e:
-            errors.append(f"Edge {from_name}->{to_name} failed: {e}")
+    y = (existing_classes // 5 + 1) * 200 + 50
+    _draw_nodes(diag, new_elements, dd_pkg, project, errors, 50, y, hide_ports=True)
+    _draw_edges(diag, new_elements, dd_pkg, project, errors)
 
     try:
-        if rhapsody:
+        if rhapsody is not None:
             rhapsody.activeProject().save()
         print(f"[BDD] Saved: {bdd_name}")
     except Exception as e:
         errors.append(f"Save failed: {e}")
 
-    return {
-        "success"     : len(errors) == 0,
-        "diagram_name": bdd_name,
-        "drawn"       : len([k for k in ge_map if k not in existing_names]),
-        "errors"      : errors
-    }
+    return {"success": len(errors) == 0, "diagram_name": bdd_name, "errors": errors}
+
+
+def _add_members(cls, cls_def, errors):
+    """Add operations / attributes that do not exist yet; report every failure."""
+    cname = cls_def.get("name", "")
+    try:
+        existing_ops = {cls.operations.Item(i).name for i in range(1, cls.operations.Count + 1)}
+    except Exception:
+        existing_ops = set()
+    for op_def in cls_def.get("operations", []):
+        op_name = op_def.get("name", "")
+        if not op_name or op_name in existing_ops:
+            continue
+        try:
+            op = win32com.client.Dispatch(cls.addNewAggr("Operation", op_name))
+        except Exception as e:
+            errors.append(f"{cname}.{op_name}: could not create operation: {e}")
+            continue
+        existing_ops.add(op_name)
+        try: op.setReturnTypeDeclaration(op_def.get("return_type", "void") or "void")
+        except Exception as e: errors.append(f"{cname}.{op_name}: return type: {e}")
+        if op_def.get("visibility"):
+            try: op.visibility = op_def["visibility"]
+            except Exception as e: errors.append(f"{cname}.{op_name}: visibility: {e}")
+        for arg in op_def.get("arguments", []):
+            try:
+                a = win32com.client.Dispatch(op.addNewAggr("Argument", arg.get("name", "arg")))
+                if arg.get("type"):
+                    a.setTypeDeclaration(arg["type"])
+            except Exception as e:
+                errors.append(f"{cname}.{op_name}: argument {arg.get('name')}: {e}")
+        args_txt = ", ".join(f"{x.get('name','')}: {x.get('type','')}" for x in op_def.get("arguments", []))
+        print(f"[BDD]   Op added: {cname}.{op_name}({args_txt}) {op_def.get('return_type','void')}")
+
+    try:
+        existing_attrs = {cls.attributes.Item(i).name for i in range(1, cls.attributes.Count + 1)}
+    except Exception:
+        existing_attrs = set()
+    for attr_def in cls_def.get("attributes", []):
+        attr_name = attr_def.get("name", "")
+        if not attr_name or attr_name in existing_attrs:
+            continue
+        try:
+            attr = win32com.client.Dispatch(cls.addNewAggr("Attribute", attr_name))
+            existing_attrs.add(attr_name)
+            if attr_def.get("type"):
+                attr.setTypeDeclaration(attr_def["type"])
+        except Exception as e:
+            errors.append(f"{cname}.{attr_name}: attribute: {e}")
+
 
 def create_bdd_from_plan(plan: dict, rhapsody=None, diagram_name: str = None) -> dict:
     """
-    Convert plan JSON to elements list and call create_bdd().
-    Searches dd_pkg FIRST to find the correct module class (not component class).
+    Apply a plan (classes + realizations/generalizations) and draw it on a BDD.
+
+    plan keys:
+      component_name, classes, realizations, generalizations
+      create_missing        False → classes must exist (module classes); never invent one
+      interface_stereotypes stereotype(s) for NEW classes when theirs do not exist
+      interface_pkg         package name (inside the component) for NEW classes
     """
-    import json as _json
     if rhapsody is None:
         rhapsody, project = get_rhapsody()
     else:
         project = rhapsody.activeProject()
 
+    errors = []
     component_name = plan.get("component_name", "")
     comp_pkg = find_package_recursive(project, component_name)
-    if not comp_pkg:
-        return {"success": False, "error": f"Component not found: {component_name}"}
+    if comp_pkg is None:
+        return {"success": False, "errors": [f"Component not found: {component_name}"]}
 
     dd_pkgs = find_dd_packages(comp_pkg)
-    dd_pkg  = next((p for p in dd_pkgs if "Cfg" not in p.name), dd_pkgs[0])
+    if not dd_pkgs:
+        return {"success": False, "errors": [f"No DetailedDesign package in {component_name}"]}
+    dd_pkg = next((p for p in dd_pkgs if "Cfg" not in p.name), dd_pkgs[0])
 
+    new_cls_pkg = dd_pkg
+    if plan.get("interface_pkg"):
+        pkg = find_package_recursive(comp_pkg, plan["interface_pkg"])
+        if pkg is not None:
+            new_cls_pkg = pkg
+        else:
+            print(f"[BDD] Interface package '{plan['interface_pkg']}' not found — using {dd_pkg.name}")
+
+    create_missing = plan.get("create_missing", True)
+    fallback_sts   = plan.get("interface_stereotypes") or []
     elements = []
 
     from plan_normalize import normalize_classes
     for cls_def in normalize_classes(plan.get("classes", [])):
         name = cls_def.get("name", "")
-        # Search dd_pkg first to get module class, not component class
-        cls = find_class_recursive(dd_pkg, name) or find_class_recursive(comp_pkg, name)
-        if not cls:
+        # Search dd_pkg first to get the module class, not the SW component class
+        cls = find_class_recursive(dd_pkg, name)
+        if cls is None:
+            cls = find_class_recursive(comp_pkg, name)
+        if cls is None:
+            if not create_missing:
+                errors.append(f"Class {name} not found in {component_name} — its operations "
+                              f"were NOT added (no new module class is created)")
+                continue
             try:
-                cls = dd_pkg.addNewAggr("Class", name)
-                print(f"[BDD] Created class: {name}")
-                # Tag for confirm_changes.py tracking
-                try: cls.addNewAggr("Tag", "LLMGenerated")
-                except: pass
-                for sn in cls_def.get("stereotypes", []):
-                    try:
-                        nested = project.getNestedElementsByMetaClass("Stereotype", 1)
-                        for i in range(1, nested.Count + 1):
-                            st = nested.Item(i)
-                            if st.name == sn:
-                                cls.addSpecificStereotype(st); break
-                    except: pass
+                cls = new_cls_pkg.addNewAggr("Class", name)
+                print(f"[BDD] Created class: {name} in {new_cls_pkg.name}")
+                try: cls.addNewAggr("Tag", "LLMGenerated")   # for confirm_changes.py
+                except Exception: pass
+                applied = [sn for sn in cls_def.get("stereotypes", [])
+                           if apply_stereotype(cls, project, sn)]
+                if not applied:
+                    applied = [sn for sn in fallback_sts if apply_stereotype(cls, project, sn)]
+                if applied:
+                    print(f"[BDD]   Stereotype(s): {applied}")
+                else:
+                    wanted = cls_def.get("stereotypes", []) or fallback_sts
+                    errors.append(f"Class {name}: stereotype {wanted or '(none given)'} not found "
+                                  f"in the project — created without stereotype")
             except Exception as e:
-                print(f"[BDD] Class failed: {e}"); continue
-        # Add operations
-        for op_def in cls_def.get("operations", []):
-            op_name = op_def.get("name", "")
-            try:
-                ops = cls.operations
-                if not any(ops.Item(i).name == op_name for i in range(1, ops.Count+1)):
-                    op = win32com.client.Dispatch(cls.addNewAggr("Operation", op_name))
-                    try: op.setReturnTypeDeclaration(op_def.get("return_type","void") or "void")
-                    except: pass
-                    try: op.visibility = op_def.get("visibility","public")
-                    except: pass
-                    for arg in op_def.get("arguments", []):
-                        try:
-                            a = win32com.client.Dispatch(op.addNewAggr("Argument", arg.get("name","arg")))
-                            try: a.setTypeDeclaration(arg.get("type",""))
-                            except: pass
-                        except: pass
-                    print(f"[BDD]   Op added: {op_name}({', '.join(a.get('name','') for a in op_def.get('arguments',[]))}) {op_def.get('return_type','void')}")
-            except: pass
-        # Add attributes
-        for attr_def in cls_def.get("attributes", []):
-            attr_name = attr_def.get("name", "")
-            try:
-                attrs = cls.attributes
-                if not any(attrs.Item(i).name == attr_name for i in range(1, attrs.Count+1)):
-                    attr = win32com.client.Dispatch(cls.addNewAggr("Attribute", attr_name))
-                    try: attr.setTypeDeclaration(attr_def.get("type",""))
-                    except: pass
-            except: pass
-
+                errors.append(f"Class {name}: could not create: {e}")
+                continue
+        _add_members(cls, cls_def, errors)
         elements.append({"type": "class_obj", "cls": cls, "name": name, "w": 172, "h": 139})
 
-    for real in plan.get("realizations", []):
-        if not isinstance(real, dict) or not real.get("specific") or not real.get("general"):
-            print(f"[BDD] Skipping malformed realization: {real!r}")
-            continue
-        specific, general = real.get("specific",""), real.get("general","")
-        # Search dd_pkg first for module class
-        from_cls = find_class_recursive(dd_pkg, specific) or find_class_recursive(comp_pkg, specific)
-        to_cls   = find_class_recursive(dd_pkg, general)  or find_class_recursive(comp_pkg, general)
-        elements.append({"type": "realization", "from": specific, "to": general,
-                         "from_cls": from_cls, "to_cls": to_cls})
-
-    for gen in plan.get("generalizations", []):
-        if not isinstance(gen, dict) or not gen.get("specific") or not gen.get("general"):
-            print(f"[BDD] Skipping malformed generalization: {gen!r}")
-            continue
-        specific, general = gen.get("specific",""), gen.get("general","")
-        from_cls = find_class_recursive(dd_pkg, specific) or find_class_recursive(comp_pkg, specific)
-        to_cls   = find_class_recursive(dd_pkg, general)  or find_class_recursive(comp_pkg, general)
-        elements.append({"type": "generalization", "from": specific, "to": general,
-                         "from_cls": from_cls, "to_cls": to_cls})
+    for kind in ("realizations", "generalizations"):
+        etype = kind[:-1]
+        for rel in plan.get(kind, []):
+            if not isinstance(rel, dict) or not rel.get("specific") or not rel.get("general"):
+                print(f"[BDD] Skipping malformed {etype}: {rel!r}")
+                continue
+            specific, general = rel["specific"], rel["general"]
+            from_cls = find_class_recursive(dd_pkg, specific)
+            if from_cls is None:
+                from_cls = find_class_recursive(comp_pkg, specific)
+            to_cls = find_class_recursive(dd_pkg, general)
+            if to_cls is None:
+                to_cls = find_class_recursive(comp_pkg, general)
+            if from_cls is None:
+                errors.append(f"{etype.capitalize()} {specific} -> {general}: "
+                              f"'{specific}' is not a class of {component_name}")
+                continue
+            # make sure both ends are on the diagram, otherwise the edge cannot be drawn
+            for nm, obj in ((specific, from_cls), (general, to_cls)):
+                if obj is not None and not any(e.get("cls") is obj for e in elements):
+                    elements.append({"type": "class_obj", "cls": obj, "name": nm, "w": 172, "h": 139})
+            elements.append({"type": etype, "from": specific, "to": general,
+                             "from_cls": from_cls, "to_cls": to_cls})
 
     bdd_name = diagram_name or f"{component_name}_BDD"
-    # Use update_bdd to add to existing diagram (preserves existing content)
-    return update_bdd(dd_pkg, bdd_name, elements, rhapsody, project)
+    res = update_bdd(dd_pkg, bdd_name, elements, rhapsody, project)
+    res["errors"] = errors + (res.get("errors") or [])
+    res["success"] = len(res["errors"]) == 0
+    return res
 
 
 if __name__ == "__main__":
@@ -663,7 +615,7 @@ if __name__ == "__main__":
 
     # Find component and DD package
     comp_pkg = find_package_recursive(project, args.component)
-    if not comp_pkg:
+    if comp_pkg is None:
         print(f"[BDD] ERROR: Component '{args.component}' not found")
         sys.exit(1)
 
@@ -691,28 +643,28 @@ if __name__ == "__main__":
 
     # Find the SW component class (in comp_pkg, not dd_pkg)
     sw_comp_cls = find_class_recursive(comp_pkg, args.component)
-    print(f"[BDD] SW Component class: {sw_comp_cls.name if sw_comp_cls else 'NOT FOUND'}")
+    print(f"[BDD] SW Component class: {sw_comp_cls.name if sw_comp_cls is not None else 'NOT FOUND'}")
 
     # ── BDD 1: DetailedDesignBDD (composition) ────────────────────────────────
     bdd1_name = f"rb_{short_name}_DetailedDesignBDD"
 
     bdd1_elements = []
     # SW Component (large block) — from comp_pkg
-    if sw_comp_cls:
+    if sw_comp_cls is not None:
         bdd1_elements.append(
             {"type": "class_obj", "cls": sw_comp_cls, "name": args.component,
              "w": 355, "h": 139})
     # Modules — from dd_pkg
     for m in modules:
         cls = find_class_recursive(dd_pkg, m["name"])
-        if cls:
+        if cls is not None:
             bdd1_elements.append(
                 {"type": "class_obj", "cls": cls, "name": m["name"],
                  "w": 162, "h": 121})
     # Configs
     for c in configs:
         cls = find_class_recursive(dd_pkg, c["name"])
-        if cls:
+        if cls is not None:
             bdd1_elements.append(
                 {"type": "class_obj", "cls": cls, "name": c["name"],
                  "w": 162, "h": 121})
@@ -725,14 +677,14 @@ if __name__ == "__main__":
 
     bdd2_elements = []
     # SW Component
-    if sw_comp_cls:
+    if sw_comp_cls is not None:
         bdd2_elements.append(
             {"type": "class_obj", "cls": sw_comp_cls, "name": args.component,
              "w": 172, "h": 139})
     # Modules
     for m in modules:
         cls = find_class_recursive(dd_pkg, m["name"])
-        if cls:
+        if cls is not None:
             bdd2_elements.append(
                 {"type": "class_obj", "cls": cls, "name": m["name"],
                  "w": 172, "h": 139})
@@ -740,9 +692,9 @@ if __name__ == "__main__":
     iface_cls_map = {}
     for iface in interfaces:
         cls = find_class_recursive(dd_pkg, iface["name"])
-        if not cls:
+        if cls is None:
             cls = find_class_recursive(comp_pkg, iface["name"])
-        if cls:
+        if cls is not None:
             iface_cls_map[iface["name"]] = cls
             bdd2_elements.append(
                 {"type": "class_obj", "cls": cls, "name": iface["name"],

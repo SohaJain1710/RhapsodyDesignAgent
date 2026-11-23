@@ -12,20 +12,25 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def _parse_static_view(static_view: str, component_name: str,
-                       base_ops: list, base_intfs: list) -> tuple[list, list, list]:
+                       base_ops: list, base_intfs: list,
+                       module_names: list = None) -> tuple[list, list, list]:
     """Turn the reviewer-edited Static View (Mermaid classDiagram) into
-    (operations, interfaces, realizations). Metadata the diagram cannot carry
-    (req_ids, rationale, usecase, ...) is kept from the proposal by name."""
+    (operations, interfaces, realizations). Classes that are modules (or the
+    component, when no module list is known) hold operations; all other
+    classes are interfaces. Metadata the diagram cannot carry (req_ids,
+    rationale, usecase, ...) is kept from the proposal by name."""
     from mermaid_to_bdd import from_mermaid
+    from plan_normalize import resolve_module
     plan = from_mermaid(static_view, component_name)
     ops_by_name  = {o.get("name"): o for o in base_ops}
     intf_by_name = {i.get("name"): i for i in base_intfs}
 
     ops, intfs = [], []
     for cls in plan.get("classes", []):
-        if cls["name"] == component_name:
+        owner = resolve_module(cls["name"], module_names or [], component_name)
+        if owner:
             for op in cls.get("operations", []):
-                merged = {**ops_by_name.get(op["name"], {}), **op}
+                merged = {**ops_by_name.get(op["name"], {}), **op, "module": owner}
                 if not op.get("stereotypes"):
                     merged.pop("stereotypes", None)
                 ops.append(merged)
@@ -34,8 +39,9 @@ def _parse_static_view(static_view: str, component_name: str,
             intfs.append({
                 **base,
                 "name"       : cls["name"],
-                "stereotypes": cls.get("stereotypes") or base.get("stereotypes") or ["Interface"],
+                "stereotypes": cls.get("stereotypes") or base.get("stereotypes") or [],
                 "operations" : cls.get("operations", []),
+                "realized_by": "",
             })
 
     realizations = list(plan.get("realizations", []))
@@ -46,52 +52,48 @@ def _parse_static_view(static_view: str, component_name: str,
     return ops, intfs, realizations
 
 
-def normalize_edits(edits: dict, component_name: str, usecase: str = "") -> dict:
+def normalize_edits(edits: dict, component_name: str, usecase: str = "",
+                    module_names: list = None) -> dict:
     """Normalize the design-review webview payload into graph/apply state fields.
 
     - new_operations / new_interfaces / ibd_delta / op_ads / updated_ad / req_map as sent
     - if the reviewer edited the Static View, it is the source of truth for
       operations, interfaces and realizations
+    - operation owners and interface realizers are validated against the
+      component's module classes (never the use case / SW component)
     - bdd_delta is (re)built so the selected interfaces are actually created
     """
-    usecase    = usecase or edits.get("usecase", "")
-    from plan_normalize import normalize_operations, normalize_classes
-    new_ops    = normalize_operations(edits.get("new_operations", []))
-    new_intfs  = normalize_classes(edits.get("new_interfaces", []))
-    realizations = None
+    from plan_normalize import validate_design
+    usecase      = usecase or edits.get("usecase", "")
+    module_names = list(module_names if module_names is not None else (edits.get("modules") or []))
+    new_ops      = edits.get("new_operations", []) or []
+    new_intfs    = edits.get("new_interfaces", []) or []
+    names        = {i.get("name") for i in new_intfs if isinstance(i, dict)}
+    # Realizations of EXISTING interfaces from the proposal; new interfaces use
+    # their (possibly edited) "Realized By" field
+    realizations = [r for r in edits.get("realizations", []) or []
+                    if isinstance(r, dict) and r.get("general") not in names]
 
     static_view = (edits.get("static_view") or "").strip()
     if edits.get("static_view_edited") and static_view:
         try:
             new_ops, new_intfs, realizations = _parse_static_view(
-                static_view, component_name, new_ops, new_intfs)
+                static_view, component_name, new_ops, new_intfs, module_names)
             print(f"[Edits] Static View parsed: {len(new_ops)} ops, {len(new_intfs)} intfs",
                   file=sys.stderr)
         except Exception as e:
             print(f"[Edits] Static View parse failed, using form values: {e}", file=sys.stderr)
 
+    v = validate_design(new_ops, new_intfs, realizations, module_names, component_name)
+    for w in v["warnings"]:
+        print(f"[Edits] WARNING: {w}", file=sys.stderr)
+    new_ops, new_intfs = v["new_operations"], v["new_interfaces"]
     for op in new_ops:
         op.setdefault("usecase", usecase)
 
-    if realizations is None:
-        names = {i.get("name") for i in new_intfs}
-        realizations = [r for r in edits.get("realizations", []) or []
-                        if r.get("general") in names]
-        for intf in new_intfs:
-            rb = intf.get("realized_by")
-            if rb and not any(r.get("general") == intf["name"] for r in realizations):
-                realizations.append({"specific": rb, "general": intf["name"]})
-            elif rb:
-                for r in realizations:
-                    if r.get("general") == intf["name"]:
-                        r["specific"] = rb   # reviewer may have edited "Realized By"
-
-    for intf in new_intfs:
-        intf.setdefault("stereotypes", ["Interface"])
-
     op_names = {o.get("name") for o in new_ops}
-    op_ads = {k: v for k, v in (edits.get("op_ads") or {}).items()
-              if k in op_names and v and v.strip()}
+    op_ads = {k: v_ for k, v_ in (edits.get("op_ads") or {}).items()
+              if k in op_names and v_ and v_.strip()}
 
     return {
         "usecase"       : usecase,
@@ -99,10 +101,14 @@ def normalize_edits(edits: dict, component_name: str, usecase: str = "") -> dict
         "req_map"       : edits.get("req_map") or {},
         "new_operations": new_ops,
         "new_interfaces": new_intfs,
-        "bdd_delta"     : {"classes": new_intfs, "realizations": realizations,
+        "bdd_delta"     : {"classes": new_intfs, "realizations": v["realizations"],
                            "generalizations": []},
         "ibd_delta"     : edits.get("ibd_delta") or {"ports": [], "links": []},
         "op_ads"        : op_ads,
+        "warnings"      : v["warnings"],
+        "module_names"  : module_names,
+        "interface_stereotypes": edits.get("interface_stereotypes") or [],
+        "interface_pkg" : edits.get("interface_pkg") or "",
     }
 
 
@@ -134,40 +140,23 @@ def apply_design_state(state: dict, component_name: str) -> dict:
                 print(f"[ApplyDirect] Analysis AD error: {e}", file=sys.stderr)
                 errors.append(f"analysis_ad: {e}")
 
-        # New operations — must be created BEFORE operation ADs
+        # New operations (per module) — must be created BEFORE operation ADs —
+        # then interfaces + realizations
+        from plan_normalize import build_bdd_plans
         new_ops = state.get("new_operations", [])
-        if new_ops:
-            print(f"[ApplyDirect] Adding {len(new_ops)} operations", file=sys.stderr)
-            ops_plan = {
-                "component_name" : component_name,
-                "classes"        : [{
-                    "name"       : component_name,
-                    "stereotypes": [],
-                    "operations" : new_ops,
-                    "attributes" : [],
-                }],
-                "realizations"   : [],
-                "generalizations": [],
-            }
-            res = create_bdd_from_plan(ops_plan, r,
+        bdd = state.get("bdd_delta", {}) or {}
+        op_plans, intf_plan = build_bdd_plans(
+            component_name, new_ops, bdd.get("classes", []), bdd.get("realizations", []),
+            state.get("interface_stereotypes"), state.get("interface_pkg", ""))
+        for plan in op_plans:
+            res = create_bdd_from_plan(plan, r,
                                        diagram_name=state.get("bdd_dd_name","DetailedDesignBDD"))
             print(f"[ApplyDirect] BDD ops result: {res}", file=sys.stderr)
-            if res.get("errors"):
-                errors.extend(res["errors"])
-
-        # New interfaces/classes
-        bdd = state.get("bdd_delta", {})
-        if bdd.get("classes") or bdd.get("realizations"):
-            plan = {
-                "component_name" : component_name,
-                "classes"        : bdd.get("classes", []),
-                "realizations"   : bdd.get("realizations", []),
-                "generalizations": bdd.get("generalizations", []),
-            }
-            res = create_bdd_from_plan(plan, r,
+            errors.extend(res.get("errors") or ([res["error"]] if res.get("error") else []))
+        if intf_plan["classes"] or intf_plan["realizations"]:
+            res = create_bdd_from_plan(intf_plan, r,
                                        diagram_name=state.get("bdd_intf_name","DetailedDesignInterfacesBDD"))
-            if res.get("errors"):
-                errors.extend(res["errors"])
+            errors.extend(res.get("errors") or ([res["error"]] if res.get("error") else []))
 
         # IBD delta
         ibd = state.get("ibd_delta", {})

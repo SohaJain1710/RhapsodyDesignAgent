@@ -280,52 +280,60 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
             stream.markdown('\n### 🔄 Updated Analysis Activity Diagram\n```mermaid\n' + data.updated_ad + '\n```');
         }
 
-        // New Operations
+        // Validation warnings (e.g. realizer was not a module class)
+        if (data.warnings && data.warnings.length) {
+            stream.markdown('\n> ⚠️ **Please check:**\n' + data.warnings.map(w => '> - ' + w).join('\n') + '\n');
+        }
+        const isId = v => /^\w+$/.test(v || '');
+        const sigOf = op => (op.name || '') + '(' + (op.arguments||[]).map(a => a.name + ': ' + (a.type||'')).join(', ') + ') ' + (op.return_type||'void');
+
+        // New Operations (grouped by owning module)
         if (data.new_operations && data.new_operations.length) {
             stream.markdown(`\n### ⚙️ Proposed New Operations (${data.new_operations.length})`);
+            const byModule = {};
             data.new_operations.forEach(op => {
-                const args = (op.arguments||[]).map(a => a.name + ': ' + a.type).join(', ');
-                const reqIds = (op.req_ids||[]).join(', ');
+                const mod = op.module || comp;
+                (byModule[mod] = byModule[mod] || []).push(op);
+                const args = (op.arguments||[]).map(a => a.name + ': ' + (a.type||'')).join(', ');
                 stream.markdown(
                     '\n**`' + op.name + '(' + args + ')` → `' + (op.return_type||'void') + '`**' +
-                    '\n- Module: `' + comp + '`' +
-                    '\n- Visibility: `' + (op.visibility||'private') + '`' +
+                    '\n- Module: `' + mod + '`' +
+                    '\n- Visibility: `' + (op.visibility||'public') + '`' +
                     '\n- Rationale: ' + (op.rationale||'') +
-                    '\n- Satisfies: `' + reqIds + '`'
+                    '\n- Satisfies: `' + (op.req_ids||[]).join(', ') + '`'
                 );
             });
-            // BDD classDiagram
-            let cd = 'classDiagram\n    class ' + comp + ' {\n';
-            data.new_operations.forEach(op => {
-                const args = (op.arguments||[]).map(a => a.name + ': ' + a.type).join(', ');
-                const vis = op.visibility === 'private' ? '-' : '+';
-                cd += '        ' + vis + op.name + '(' + args + ') ' + (op.return_type||'void') + '\n';
+            let cd = 'classDiagram\n';
+            Object.entries(byModule).forEach(([mod, ops]) => {
+                cd += '    class ' + mod.replace(/\W/g, '_') + ' {\n';
+                ops.forEach(op => { cd += '        ' + ({ private: '-', protected: '#' }[op.visibility] || '+') + sigOf(op) + '\n'; });
+                cd += '    }\n';
             });
-            cd += '    }';
-            stream.markdown('\n**BDD Change:**\n```mermaid\n' + cd + '\n```');
+            stream.markdown('\n**BDD Change:**\n```mermaid\n' + cd + '```');
         } else {
             stream.markdown('\n### ⚙️ Operations\n> No new operations needed.');
         }
 
-        // New Interfaces
-        if (data.new_interfaces && data.new_interfaces.length) {
-            stream.markdown('\n### 🔌 Proposed New Interfaces (' + data.new_interfaces.length + ')');
+        // New Interfaces + realizations (realizer is always a module class)
+        const reals = data.realizations || [];
+        if ((data.new_interfaces && data.new_interfaces.length) || reals.length) {
+            stream.markdown('\n### 🔌 Proposed New Interfaces (' + (data.new_interfaces||[]).length + ')');
             let cd2 = 'classDiagram\n';
-            data.new_interfaces.forEach(intf => {
-                cd2 += '    class ' + intf.name + ' {\n        <<Interface>>\n';
-                (intf.operations||[]).forEach(op => {
-                    const args = (op.arguments||[]).map(a => a.name + ': ' + a.type).join(', ');
-                    cd2 += '        +' + op.name + '(' + args + ') ' + (op.return_type||'void') + '\n';
-                    stream.markdown(
-                        '\n**`' + intf.name + '`**' +
-                        '\n- Realized by: `' + (intf.realized_by||'—') + '`' +
-                        '\n- Operation: `' + op.name + '(' + args + ')` → `' + (op.return_type||'void') + '`'
-                    );
-                });
+            (data.new_interfaces||[]).forEach(intf => {
+                const ops = intf.operations || [];
+                stream.markdown(
+                    '\n**`' + intf.name + '`**' +
+                    '\n- Realized by: `' + (intf.realized_by || '— not set —') + '`' +
+                    (ops.length ? '\n- Operations: ' + ops.map(op => '`' + sigOf(op) + '`').join(', ') : '')
+                );
+                cd2 += '    class ' + intf.name.replace(/\W/g, '_') + ' {\n        <<Interface>>\n';
+                ops.forEach(op => { cd2 += '        +' + sigOf(op) + '\n'; });
                 cd2 += '    }\n';
-                if (intf.realized_by) cd2 += '    ' + intf.realized_by + ' ..|> ' + intf.name + ' : realizes\n';
             });
-            stream.markdown('\n**BDD Interfaces Change:**\n```mermaid\n' + cd2 + '\n```');
+            reals.forEach(r => {
+                if (isId(r.specific) && isId(r.general)) cd2 += '    ' + r.specific + ' ..|> ' + r.general + ' : realizes\n';
+            });
+            stream.markdown('\n**BDD Interfaces Change:**\n```mermaid\n' + cd2 + '```');
         }
 
         // IBD Changes
@@ -470,6 +478,8 @@ function openReviewWebview(context, data, comp, outputFile, stream, token) {
         new_operations  : data.new_operations || [],
         new_interfaces  : data.new_interfaces || [],
         realizations    : data.realizations || [],
+        modules         : data.modules || [],
+        warnings        : data.warnings || [],
         ibd_delta       : data.ibd_delta || { ports: [], links: [] },
     });
 
@@ -670,6 +680,8 @@ button { padding: 8px 18px; border: none; border-radius: 4px; cursor: pointer; f
 code { background: #264f78; color: #9cdcfe; border-radius: 3px; padding: 1px 4px; font-size: 12px; }
 .op-select { margin-bottom: 8px; }
 .hint { font-size: 11px; color: #888; }
+.section.warn { border-color: #b08800; }
+.section.warn .meta { color: #e2c08d; font-size: 12px; margin-bottom: 4px; }
 .ed-actions { display: flex; gap: 8px; align-items: center; }
 textarea.fb { width: 100%; height: 70px; resize: vertical; background: #1e1e1e; color: #d4d4d4;
   border: 1px solid #555; border-radius: 3px; padding: 8px; font-size: 12px; }
@@ -743,6 +755,15 @@ function render() {
     const app = document.getElementById('app');
     app.innerHTML = '';
 
+    // Validation warnings
+    if ((RAW.warnings || []).length) {
+        const wDiv = el('div', 'section warn');
+        wDiv.appendChild(el('h2', '', '⚠️ Please check'));
+        RAW.warnings.forEach(w => wDiv.appendChild(el('div', 'meta', esc(w))));
+        app.appendChild(wDiv);
+    }
+    const MODULES = RAW.modules || [];
+
     // Operations
     const opsDiv = el('div', 'section');
     opsDiv.appendChild(el('h2', '', '⚙️ Operations'));
@@ -754,11 +775,15 @@ function render() {
         item.appendChild(cb);
         const det = el('div', 'details');
         det.appendChild(el('div', 'title', '<code>' + esc(op.name) + '</code><span class="badge-new">NEW</span>'));
-        det.appendChild(el('div', 'meta', 'Returns: <code>' + esc(op.return_type||'void') + '</code> | ' + esc(op.visibility||'private') + ' | ' + esc((op.req_ids||[]).join(', '))));
+        det.appendChild(el('div', 'meta', 'Returns: <code>' + esc(op.return_type||'void') + '</code> | ' + esc(op.visibility||'public') + ' | ' + esc((op.req_ids||[]).join(', '))));
         const fields = el('div', 'fields');
         fields.appendChild(field('Name',        inp(op.name,            v => renameOp(i, v), '160px')));
         fields.appendChild(field('Return Type', inp(op.return_type||'void', v => S.new_operations[i].return_type = v, '100px')));
-        fields.appendChild(field('Visibility',  selEl(['private','public','protected'], op.visibility||'private', v => S.new_operations[i].visibility = v)));
+        fields.appendChild(field('Visibility',  selEl(['private','public','protected'], op.visibility||'public', v => S.new_operations[i].visibility = v)));
+        if (MODULES.length) {
+            if (!MODULES.includes(op.module)) S.new_operations[i].module = MODULES[0];
+            fields.appendChild(field('Module', selEl(MODULES, S.new_operations[i].module, v => S.new_operations[i].module = v)));
+        }
         det.appendChild(fields);
         if (op.arguments && op.arguments.length) {
             const al = el('div', 'arg-list');
@@ -790,7 +815,13 @@ function render() {
             det.appendChild(el('div', 'meta', 'Realized by: ' + esc(intf.realized_by||'—')));
             const fields = el('div', 'fields');
             fields.appendChild(field('Name',        inp(intf.name,            v => S.new_interfaces[i].name = v, '160px')));
-            fields.appendChild(field('Realized By', inp(intf.realized_by||'', v => S.new_interfaces[i].realized_by = v, '160px')));
+            if (MODULES.length) {
+                // Only module classes can realize an interface
+                const opts = MODULES.includes(intf.realized_by) ? MODULES : ['', ...MODULES];
+                fields.appendChild(field('Realized By (module)', selEl(opts, intf.realized_by || '', v => S.new_interfaces[i].realized_by = v)));
+            } else {
+                fields.appendChild(field('Realized By', inp(intf.realized_by||'', v => S.new_interfaces[i].realized_by = v, '160px')));
+            }
             det.appendChild(fields);
             item.appendChild(det);
             intfDiv.appendChild(item);
@@ -977,18 +1008,32 @@ function mId(name) { return String(name || '').replace(/\\W/g, '_'); }
 function buildStaticView() {
     const visSym = v => v === 'public' ? '+' : v === 'protected' ? '#' : '-';
     const sig = op => mId(op.name) + '(' + (op.arguments||[]).map(a => a.name + ': ' + (a.type||'')).join(', ') + ') ' + (op.return_type||'void');
-    let cd = 'classDiagram\\n    class ' + mId(comp) + ' {\\n';
+    const byModule = {};
     S.new_operations.filter(o => o._sel).forEach(op => {
-        cd += '        ' + visSym(op.visibility || 'private') + sig(op) + '\\n';
+        const mod = op.module || comp;
+        (byModule[mod] = byModule[mod] || []).push(op);
     });
-    cd += '    }\\n';
+    if (!Object.keys(byModule).length) byModule[(RAW.modules || [])[0] || comp] = [];
+    let cd = 'classDiagram\\n';
+    Object.entries(byModule).forEach(([mod, ops]) => {
+        cd += '    class ' + mId(mod) + ' {\\n';
+        ops.forEach(op => { cd += '        ' + visSym(op.visibility || 'public') + sig(op) + '\\n'; });
+        cd += '    }\\n';
+    });
+    const intfNames = new Set();
     S.new_interfaces.filter(i => i._sel).forEach(intf => {
+        intfNames.add(intf.name);
         cd += '    class ' + mId(intf.name) + ' {\\n        <<Interface>>\\n';
         (intf.operations||[]).forEach(op => { cd += '        +' + sig(op) + '\\n'; });
         cd += '    }\\n';
-        // Realizations only for valid Mermaid identifiers (e.g. not use-case names with spaces)
         if (intf.realized_by && /^\\w+$/.test(intf.realized_by)) {
             cd += '    ' + intf.realized_by + ' ..|> ' + mId(intf.name) + ' : realizes\\n';
+        }
+    });
+    // Realizations of EXISTING interfaces proposed by the LLM
+    (RAW.realizations || []).forEach(r => {
+        if (!intfNames.has(r.general) && /^\\w+$/.test(r.specific || '') && /^\\w+$/.test(r.general || '')) {
+            cd += '    ' + r.specific + ' ..|> ' + r.general + ' : realizes\\n';
         }
     });
     return cd;
@@ -1043,6 +1088,7 @@ function applyChanges() {
         new_operations     : S.new_operations.filter(o => o._sel).map(strip),
         new_interfaces     : S.new_interfaces.filter(i => i._sel).map(strip),
         realizations       : RAW.realizations || [],
+        modules            : RAW.modules || [],
         ibd_delta          : {
             ports: S.ports.filter(p => p._sel).map(strip),
             links: S.links.filter(l => l._sel).map(strip),

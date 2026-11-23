@@ -67,6 +67,10 @@ class DesignState(TypedDict):
     bdd_intf_name    : str         # actual interfaces diagram name in Rhapsody
     ibd              : str         # IBD Mermaid
     unrealized_intfs : list
+    module_names     : list        # module classes (AB12Module) of the component
+    interface_stereotypes: list    # stereotype(s) used by existing interfaces
+    interface_pkg    : str         # package that holds existing interfaces
+    design_warnings  : list        # validation warnings shown in the design review
 
     # Shared LLM bus
     current_phase    : str         # which phase is using llm_node
@@ -186,6 +190,9 @@ Identify what new operations and interfaces are needed to implement the updated 
 # Existing Interfaces + Unrealized Gaps (BDD Interfaces)
 {bdd_interfaces}
 
+# Module Classes of this Component (AB12Module)
+{modules}
+
 Rules:
 - Reuse existing operations where possible — only add new ones if truly needed
 - New operation names: follow existing naming convention from BDD (rb_<componentPrefix>_<VerbNoun>)
@@ -194,6 +201,10 @@ Rules:
 - Use existing types from BDD — do NOT invent new types
 - For each action in the AD, map it to an existing or new operation
 - New functionality: map each new action to exactly ONE module (1 action → 1 module)
+- Every new operation MUST name its owning module in "module" — one of the Module Classes above
+- Interfaces are realized ONLY by a module class from the Module Classes list above:
+  "realized_by" and every realizations "specific" MUST be one of those module names.
+  NEVER use the use case name, the SW component, or an actor as realizer.
 - Every operation (also inside "new_interfaces") MUST be a JSON object with "name",
   "return_type" and "arguments" — never a signature string
 
@@ -208,7 +219,8 @@ Respond ONLY with valid JSON:
       "visibility": "public",
       "stereotypes": [],
       "rationale": "needed for SRS_XXX",
-      "req_ids": ["SRS_XXX_001"]
+      "req_ids": ["SRS_XXX_001"],
+      "module": "<module class from the Module Classes list>"
     }}
   ],
   "new_interfaces": [
@@ -223,11 +235,11 @@ Respond ONLY with valid JSON:
         }}
       ],
       "attributes": [],
-      "realized_by": "{usecase}"
+      "realized_by": "<module class from the Module Classes list>"
     }}
   ],
   "realizations": [
-    {{"specific": "{usecase}", "general": "rb_<moduleShortName>_<InterfaceName>Intf"}}
+    {{"specific": "<module class from the Module Classes list>", "general": "rb_<moduleShortName>_<InterfaceName>Intf"}}
   ]
 }}
 """
@@ -590,6 +602,70 @@ def pick_usecase_node(state: DesignState) -> dict:
 
 # ── Read Context ──────────────────────────────────────────────────────────────
 
+_MODULE_STEREOTYPES = ("AB12Module", "SWModuleBlock")
+_NON_INTF_STEREOTYPES = set(_MODULE_STEREOTYPES) | {"AB12SWComponent", "AB12ConfigFile"}
+
+
+def _read_design_structure(project, dd_pkg, comp_pkg, bdds: list):
+    """Return (module_names, interface_stereotypes, interface_package_name)."""
+    from collections import Counter
+    try:
+        from project_config import get_conventions
+        mod_st = get_conventions(project.name).get("module_stereotype")
+    except Exception:
+        mod_st = None
+    module_sts = set(_MODULE_STEREOTYPES) | ({mod_st} if mod_st else set())
+
+    modules, intf_counter, intf_names = [], Counter(), []
+    for bdd in bdds:
+        for c in bdd.get("classes", []):
+            sts = c.get("stereotypes", []) or []
+            if module_sts & set(sts) or c.get("role") == "module":
+                if c["name"] not in modules:
+                    modules.append(c["name"])
+            elif (c["name"].endswith(("Intf", "If"))
+                  or any("interface" in st.lower() for st in sts)):
+                intf_names.append(c["name"])
+                for st in sts:
+                    if st not in _NON_INTF_STEREOTYPES:
+                        intf_counter[st] += 1
+
+    # Modules not shown on any BDD: walk the DD package
+    def walk(pkg, depth=0):
+        if pkg is None or depth > 8:
+            return
+        try:
+            for i in range(1, pkg.classes.Count + 1):
+                cls = pkg.classes.Item(i)
+                try:
+                    sts = {cls.stereotypes.Item(k).name for k in range(1, cls.stereotypes.Count + 1)}
+                except Exception:
+                    sts = set()
+                if module_sts & sts and cls.name not in modules:
+                    modules.append(cls.name)
+        except Exception:
+            pass
+        try:
+            for i in range(1, pkg.packages.Count + 1):
+                walk(pkg.packages.Item(i), depth + 1)
+        except Exception:
+            pass
+    walk(dd_pkg)
+
+    intf_pkg = ""
+    if intf_names:
+        try:
+            from create_bdd import find_class_recursive
+            cls = find_class_recursive(comp_pkg, intf_names[0])
+            if cls is not None:
+                intf_pkg = cls.owner.name
+        except Exception:
+            pass
+
+    stereotypes = [st for st, _ in intf_counter.most_common(1)]
+    return modules, stereotypes, intf_pkg
+
+
 def read_context_node(state: DesignState) -> dict:
     print(f"[Context] Reading diagrams for: {state['current_usecase']}")
     try:
@@ -640,17 +716,22 @@ def read_context_node(state: DesignState) -> dict:
                 existing_req_map[action_id] = reqs
         print(f"[Context] Existing req mappings: {len(existing_req_map)} actions")
 
-        # Find BDD diagram names dynamically
+        # Find BDD diagram names dynamically — prefer the conventional names
+        # (…DetailedDesignBDD / …DetailedDesignInterfacesBDD) over any other OMD
         bdd_dd_name    = None
         bdd_intf_name  = None
         try:
-            for i in range(1, dd_pkg.objectModelDiagrams.Count + 1):
-                d = dd_pkg.objectModelDiagrams.Item(i)
-                if "Interface" in d.name or "Intf" in d.name:
-                    bdd_intf_name = d.name
-                else:
-                    bdd_dd_name = d.name
-        except: pass
+            omd_names = [dd_pkg.objectModelDiagrams.Item(i).name
+                         for i in range(1, dd_pkg.objectModelDiagrams.Count + 1)]
+            intf_cands = [n for n in omd_names if "Interface" in n or "Intf" in n]
+            dd_cands   = [n for n in omd_names if n not in intf_cands]
+            bdd_intf_name = next((n for n in intf_cands if n.endswith("DetailedDesignInterfacesBDD")),
+                                 intf_cands[0] if intf_cands else None)
+            bdd_dd_name   = next((n for n in dd_cands if n.endswith("DetailedDesignBDD")),
+                                 next((n for n in dd_cands if "BDD" in n),
+                                      dd_cands[0] if dd_cands else None))
+        except Exception as e:
+            print(f"[Context] Could not list BDDs: {e}")
         print(f"[Context] BDD diagrams: DD={bdd_dd_name}, Intf={bdd_intf_name}")
 
         # BDDs
@@ -659,6 +740,13 @@ def read_context_node(state: DesignState) -> dict:
         unrealized = find_unrealized_interfaces(dd_pkg, comp_pkg)
 
         bdd_dd_str   = bdd_mermaid(bdds_dd[0])   if bdds_dd   else "%% No DD BDD"
+
+        # Module classes (owners of new operations, realizers of interfaces),
+        # existing interface stereotype(s) and the package interfaces live in
+        module_names, intf_stereotypes, intf_pkg = _read_design_structure(
+            p, dd_pkg, comp_pkg, bdds_dd + bdds_intf)
+        print(f"[Context] Modules: {module_names} | interface stereotypes: "
+              f"{intf_stereotypes} | interface package: {intf_pkg or dd_pkg.name}")
         bdd_intf_str = bdd_mermaid(bdds_intf[0],
                            unrealized=unrealized) if bdds_intf else "%% No Interfaces BDD"
 
@@ -676,6 +764,9 @@ def read_context_node(state: DesignState) -> dict:
             "bdd_intf_name"  : bdd_intf_name or "DetailedDesignInterfacesBDD",
             "ibd"            : ibd_str,
             "unrealized_intfs": unrealized.get("unrealized", []),
+            "module_names"   : module_names,
+            "interface_stereotypes": intf_stereotypes,
+            "interface_pkg"  : intf_pkg,
         }
     except Exception as e:
         print(f"[Context] ERROR: {e}")
@@ -817,6 +908,8 @@ def design_elements_prompt_node(state: DesignState) -> dict:
         updated_ad     = state["updated_ad"],
         bdd_dd         = state["bdd_dd"],
         bdd_interfaces = state["bdd_interfaces"],
+        modules        = "\n".join(f"- {m}" for m in state.get("module_names") or [])
+                         or f"- {state['component_name']}  (module list could not be read)",
     )
 
     # Re-run after the reviewer rejected the previous design (HITL #2)
@@ -840,23 +933,32 @@ def design_elements_prompt_node(state: DesignState) -> dict:
 
 
 def design_elements_parse_node(state: DesignState) -> dict:
-    from plan_normalize import normalize_operations, normalize_classes
+    from plan_normalize import validate_design
     result    = extract_json(state["llm_response"], default={})
     if not isinstance(result, dict):
         result = {}
-    # LLM sometimes returns operations as signature strings — convert to dicts
-    new_ops   = normalize_operations(result.get("new_operations", []))
-    new_intfs = normalize_classes(result.get("new_interfaces", []))
+    # Normalize string signatures and make every operation owner / interface
+    # realizer a real module class (never the use case or the SW component)
+    v = validate_design(result.get("new_operations", []),
+                        result.get("new_interfaces", []),
+                        result.get("realizations", []),
+                        state.get("module_names") or [],
+                        state["component_name"])
+    new_ops, new_intfs = v["new_operations"], v["new_interfaces"]
     for op in new_ops:
         op["usecase"] = state["current_usecase"]
-    print(f"[DesignElements] Ops: {len(new_ops)}, Intfs: {len(new_intfs)}")
+    for w in v["warnings"]:
+        print(f"[DesignElements] WARNING: {w}")
+    print(f"[DesignElements] Ops: {len(new_ops)}, Intfs: {len(new_intfs)}, "
+          f"Realizations: {v['realizations']}")
     return {
-        "new_operations": new_ops,
-        "new_interfaces": new_intfs,
-        "action_op_map" : result.get("action_op_map", {}),
-        "bdd_delta"     : {
+        "new_operations" : new_ops,
+        "new_interfaces" : new_intfs,
+        "design_warnings": v["warnings"],
+        "action_op_map"  : result.get("action_op_map", {}),
+        "bdd_delta"      : {
             "classes"        : new_intfs,
-            "realizations"   : result.get("realizations", []),
+            "realizations"   : v["realizations"],
             "generalizations": [],
         },
     }
@@ -997,6 +1099,8 @@ def human_review_node(state: DesignState) -> dict:
         "new_operations": state.get("new_operations", []),
         "new_interfaces": state.get("new_interfaces", []),
         "realizations"  : (state.get("bdd_delta") or {}).get("realizations", []),
+        "modules"       : state.get("module_names") or [],
+        "warnings"      : state.get("design_warnings") or [],
         "ibd_delta"     : state.get("ibd_delta", {}),
         "message"       : "Review the proposed design changes. Reply 'apply' to approve or provide feedback.",
     })
@@ -1013,7 +1117,8 @@ def human_review_node(state: DesignState) -> dict:
             # Reviewer edited the design in the webview — use the edited version
             from apply_design import normalize_edits
             norm = normalize_edits(edits, state["component_name"],
-                                   usecase=state["current_usecase"])
+                                   usecase=state["current_usecase"],
+                                   module_names=state.get("module_names") or [])
             result.update({
                 "new_operations": norm["new_operations"],
                 "new_interfaces": norm["new_interfaces"],
@@ -1025,6 +1130,9 @@ def human_review_node(state: DesignState) -> dict:
                 result["updated_ad"] = _clean_mermaid_flowchart(norm["updated_ad"])
             if norm.get("req_map"):
                 result["existing_req_map"] = norm["req_map"]
+            for w in norm.get("warnings", []):
+                print(f"[HumanReview] WARNING: {w}")
+            result["design_warnings"] = norm.get("warnings", [])
             print(f"[HumanReview] Applying reviewer edits: "
                   f"{len(norm['new_operations'])} ops, {len(norm['new_interfaces'])} intfs")
     else:
@@ -1072,39 +1180,25 @@ def apply_node(state: DesignState) -> dict:
                 print(f"[Apply] Analysis AD error: {e}", file=sys.stderr)
                 errors.append(f"analysis_ad: {e}")
 
-        # ── New operations → add to existing module class ─────────────────────
-        new_ops = state.get("new_operations", [])
-        print(f"[Apply] New ops: {len(new_ops)}", file=sys.stderr)
-        if new_ops:
-            from create_bdd import create_bdd_from_plan
-            ops_plan = {
-                "component_name" : state["component_name"],
-                "classes"        : [{
-                    "name"       : state["component_name"],
-                    "stereotypes": [],
-                    "operations" : new_ops,
-                    "attributes" : [],
-                }],
-                "realizations"   : [],
-                "generalizations": [],
-            }
-            res = create_bdd_from_plan(ops_plan, r,
+        # ── New operations → their module class; interfaces + realizations ──
+        from plan_normalize import build_bdd_plans
+        bdd = state.get("bdd_delta") or {}
+        op_plans, intf_plan = build_bdd_plans(
+            state["component_name"], state.get("new_operations", []),
+            bdd.get("classes", []), bdd.get("realizations", []),
+            state.get("interface_stereotypes"), state.get("interface_pkg", ""))
+        print(f"[Apply] New ops: {len(state.get('new_operations', []))} "
+              f"in modules {[p['classes'][0]['name'] for p in op_plans]}", file=sys.stderr)
+        for plan in op_plans:
+            res = create_bdd_from_plan(plan, r,
                                        diagram_name=state.get("bdd_dd_name","DetailedDesignBDD"))
             print(f"[Apply] create_bdd_from_plan result: {res}", file=sys.stderr)
-            if res.get("errors"):
-                errors.extend(res["errors"])
-        bdd = state.get("bdd_delta", {})
-        if bdd.get("classes") or bdd.get("realizations"):
-            plan = {
-                "component_name" : state["component_name"],
-                "classes"        : bdd.get("classes", []),
-                "realizations"   : bdd.get("realizations", []),
-                "generalizations": bdd.get("generalizations", []),
-            }
-            res = create_bdd_from_plan(plan, r,
+            errors.extend(res.get("errors") or ([res["error"]] if res.get("error") else []))
+        if intf_plan["classes"] or intf_plan["realizations"]:
+            res = create_bdd_from_plan(intf_plan, r,
                 diagram_name=state.get("bdd_intf_name","DetailedDesignInterfacesBDD"))
-            if res.get("errors"):
-                errors.extend(res["errors"])
+            print(f"[Apply] interfaces result: {res}", file=sys.stderr)
+            errors.extend(res.get("errors") or ([res["error"]] if res.get("error") else []))
 
         # IBD delta
         ibd = state.get("ibd_delta", {})
