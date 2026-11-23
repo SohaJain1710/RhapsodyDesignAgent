@@ -16,9 +16,10 @@ Full pipeline:
          → human_review_ad   ◄── HITL #1: approve/correct Analysis AD
          → design_elements_prompt → llm → design_elements_parse
          → design_ibd_prompt → llm → design_ibd_parse
-         → human_review      ◄── HITL #2: approve full design (ops/intfs/IBD)
+         → op_ad_generate    (Operation ADs, shown in the review's Dynamic View)
+         → human_review      ◄── HITL #2: approve full design (ops/intfs/IBD/op ADs)
          → apply
-         → fan_out_ad → [op_ad_prompt → llm → op_ad_parse → apply_op_ad]
+         → fan_out_ad        (create the approved Operation ADs in Rhapsody)
          → next_usecase → (loop or END)
 """
 
@@ -75,6 +76,8 @@ class DesignState(TypedDict):
     ibd_name         : str         # package-level IBD diagram name
     existing_ports   : dict        # {module: {port: {provided, required}}}
     unexposed_ops    : list        # "module.op" public operations not offered by any interface
+    module_members   : dict        # {module: {operations: [...], attributes: [...]}}
+    op_ads_replace   : list        # op names whose AD the reviewer edited (replace existing AD)
 
     # Shared LLM bus
     current_phase    : str         # which phase is using llm_node
@@ -99,15 +102,6 @@ class DesignState(TypedDict):
     ad_feedback      : str         # feedback from Analysis AD review (HITL #1)
     op_ads           : dict        # {op_name → mermaid} edited by the reviewer
     errors           : Annotated[list, operator.add]
-
-
-# Sub-state for fan-out
-class OpADState(TypedDict):
-    component_name : str
-    operation      : dict
-    updated_ad     : str
-    llm_prompt     : str
-    llm_response   : str
 
 
 # ── Prompt templates ──────────────────────────────────────────────────────────
@@ -317,49 +311,90 @@ Respond ONLY with valid JSON:
 
 OP_AD_PROMPT = """\
 You are a SysML architect generating an AB12 Operation Activity Diagram (AB12-Design perspective in Rhapsody).
-This is the DESIGN level — one activity diagram per operation, showing HOW the operation behaves.
-It is distinct from the Analysis Activity Diagram; the analysis AD is provided only as context.
+This is the DESIGN level — one activity diagram per operation, showing HOW this operation behaves.
+It is distinct from the Analysis Activity Diagram, which is given only as context.
 
 # Operation
+Module      : {module}
 Name        : {op_name}
 Arguments   : {arguments}
 Return type : {return_type}
 Rationale   : {rationale}
 Requirements: {req_ids}
 
-# Analysis Activity Diagram (context only — shows the analysis actions this operation implements)
+# Analysis Action(s) Implemented by this Operation
+{implements}
+
+# Existing Members of {module} (may be used / called by this operation)
+{members}
+
+# Analysis Activity Diagram (context only)
 {updated_ad}
 
-Rules:
-- Ignore the operation logic and focus only on producing Mermaid with the exact syntax below.
-- The first line MUST be exactly: graph TD
-- Declare the start node as: initial([▶ start])
-- Declare the end node as: activityfinal_1([⏹ end])
-- Declare each action with a sequential ID and this exact shape: action_0["Action name<br><<design>>"]
-- Declare decisions with this shape: decision_0{"Condition?<br><<design>>"}
-- Declare merge nodes with this shape: merge_0((merge))
-- Use valid Mermaid identifiers containing only letters, digits, and underscores; do not put spaces in IDs.
-- Use <br> between the node name and its stereotype; do not use raw newlines inside node declarations.
-- Every action label MUST end with <br><<design>>. Do not use <<analysis>>.
-- Connect declared nodes using Mermaid arrows. Edge labels MUST NOT contain square brackets; use -->|Yes| or -->|Condition met|.
-- Do NOT use fork/join nodes, Call Operations, or Call Behaviours.
-- Return ONLY the Mermaid flowchart, with no Markdown fences or explanatory text.
+Content rules:
+- Describe what THIS operation does step by step, based on its signature, rationale,
+  requirements and the analysis action(s) it implements
+- Use 1 to 5 design actions — abstract design intent, no C code, no variable-level detail
+- Refer to existing members of the module by name where the operation uses them
+- Show how the return value / result is determined when the return type is not void
 
-Required syntax example (illustrative names and connections only):
+Syntax rules (exact):
+- The first line MUST be exactly: graph TD
+- Start node: initial([▶ start])     End node: activityfinal_1([⏹ end])
+- Actions: action_0["Action name<br><<design>>"] with sequential IDs (action_0, action_1, ...)
+- Every decision QUESTION goes into an action box: action_2["Is the section valid?<br><<design>>"],
+  followed by a decision diamond whose label is exactly "decision": decision_0{{"decision"}}
+  Every decision diamond has exactly one incoming transition (from its question action);
+  its guarded outgoing transitions use -->|Yes| / -->|No| (no square brackets in labels)
+- Merge nodes: merge_0((merge))
+- Valid Mermaid identifiers only (letters, digits, underscores); use <br> before the stereotype,
+  no raw newlines inside node declarations
+- Every action label MUST end with <br><<design>> (never <<analysis>>)
+- Do NOT use fork/join nodes, Call Operations or Call Behaviours
+- Return ONLY the Mermaid flowchart — no Markdown fences, no explanation
+
+Syntax example (illustrative only):
 graph TD
-        initial([▶ start])
-        action_0["Prepare design information<br><<design>>"]
-        decision_0{"Condition?<br><<design>>"}
-        action_1["Select design response<br><<design>>"]
-        merge_0((merge))
-        activityfinal_1([⏹ end])
-        initial --> action_0
-        action_0 --> decision_0
-        decision_0 -->|Yes| action_1
-        decision_0 -->|No| merge_0
-        action_1 --> merge_0
-        merge_0 --> activityfinal_1
+    initial([▶ start])
+    action_0["Read the section status<br><<design>>"]
+    action_1["Is the section eligible for the check?<br><<design>>"]
+    decision_0{{"decision"}}
+    action_2["Calculate and compare the CRC<br><<design>>"]
+    merge_0((merge))
+    activityfinal_1([⏹ end])
+    initial --> action_0
+    action_0 --> action_1
+    action_1 --> decision_0
+    decision_0 -->|Yes| action_2
+    decision_0 -->|No| merge_0
+    action_2 --> merge_0
+    merge_0 --> activityfinal_1
 """
+
+
+def build_op_ad_prompt(op: dict, state: dict) -> str:
+    """OP_AD_PROMPT for one operation (shared by the graph and apply_design)."""
+    name = op.get("name", "")
+    implements = [act for act, o in (state.get("action_op_map") or {}).items() if o == name]
+    module = op.get("module") or state.get("component_name", "")
+    members = (state.get("module_members") or {}).get(module) or {}
+    member_lines = [f"- {m}" for m in (members.get("operations", []) + members.get("attributes", []))[:60]]
+    return OP_AD_PROMPT.format(
+        module      = module,
+        op_name     = name,
+        arguments   = json.dumps(op.get("arguments", []), indent=2),
+        return_type = op.get("return_type", "void"),
+        rationale   = op.get("rationale", ""),
+        req_ids     = ", ".join(op.get("req_ids", []) or []),
+        implements  = "\n".join(f"- {a}" for a in implements) or "(not mapped to a specific analysis action)",
+        members     = "\n".join(member_lines) or "(none known)",
+        updated_ad  = state.get("updated_ad", ""),
+    )
+
+
+def clean_op_ad(text: str) -> str:
+    """LLM output → Mermaid flowchart ready for create_operation_ad."""
+    return _sanitize_mermaid(_with_flowchart_header(text or ""))
 
 
 # ── Node 1: Ingest ────────────────────────────────────────────────────────────
@@ -704,6 +739,26 @@ def _read_design_structure(project, dd_pkg, comp_pkg, bdds: list):
     return modules, stereotypes, intf_pkg, list(dict.fromkeys(intf_names))
 
 
+def _module_members(bdds: list, module_names: list) -> dict:
+    """{module: {"operations": [signatures], "attributes": [name: type]}} from the BDDs."""
+    out = {}
+    for bdd in bdds:
+        for c in bdd.get("classes", []):
+            if c["name"] not in module_names or c.get("role") == "component":
+                continue
+            m = out.setdefault(c["name"], {"operations": [], "attributes": []})
+            for op in c.get("operations", []) or []:
+                args = ", ".join(f"{a.get('name')}: {a.get('type', '')}" for a in op.get("arguments", []))
+                sig = f"{op['name']}({args}) {op.get('return_type') or 'void'}"
+                if sig not in m["operations"]:
+                    m["operations"].append(sig)
+            for at in c.get("attributes", []) or []:
+                a = f"{at['name']}: {at.get('type', '')}"
+                if a not in m["attributes"]:
+                    m["attributes"].append(a)
+    return out
+
+
 def _unexposed_public_ops(bdds: list, module_names: list) -> list:
     """Public operations of the module classes that no interface on the BDDs offers."""
     offered, public = set(), {}
@@ -800,6 +855,7 @@ def read_context_node(state: DesignState) -> dict:
         module_names, intf_stereotypes, intf_pkg, intf_names = _read_design_structure(
             p, dd_pkg, comp_pkg, bdds_dd + bdds_intf)
         unexposed = _unexposed_public_ops(bdds_dd + bdds_intf, module_names)
+        module_members = _module_members(bdds_dd + bdds_intf, module_names)
         print(f"[Context] Public module operations not in any interface: {len(unexposed)}")
         print(f"[Context] Modules: {module_names} | interface stereotypes: "
               f"{intf_stereotypes} | interface package: {intf_pkg or dd_pkg.name}")
@@ -840,6 +896,7 @@ def read_context_node(state: DesignState) -> dict:
             "interface_pkg"  : intf_pkg,
             "known_interfaces": list(dict.fromkeys(intf_names + unrealized.get("all_interfaces", []))),
             "unexposed_ops"  : unexposed,
+            "module_members" : module_members,
             "ibd_name"       : ibd_name,
             "existing_ports" : existing_ports,
         }
@@ -1223,6 +1280,7 @@ def human_review_node(state: DesignState) -> dict:
         "modules"       : state.get("module_names") or [],
         "known_interfaces": state.get("known_interfaces") or [],
         "warnings"      : state.get("design_warnings") or [],
+        "op_ads"        : state.get("op_ads") or {},
         "ibd_delta"     : state.get("ibd_delta", {}),
         "message"       : "Review the proposed design changes. Reply 'apply' to approve or provide feedback.",
     })
@@ -1249,6 +1307,8 @@ def human_review_node(state: DesignState) -> dict:
                 "bdd_delta"     : norm["bdd_delta"],
                 "ibd_delta"     : norm["ibd_delta"],
                 "op_ads"        : norm["op_ads"],
+                "op_ads_replace": [n for n in (edits.get("op_ads_edited") or [])
+                                   if n in norm["op_ads"]],
             })
             if norm.get("updated_ad"):
                 result["updated_ad"] = _clean_mermaid_flowchart(norm["updated_ad"])
@@ -1350,73 +1410,69 @@ def apply_node(state: DesignState) -> dict:
     return {"applied_usecases": [state["current_usecase"]], "errors": errors}
 
 
-# ── Fan-out: Operation ADs ────────────────────────────────────────────────────
+# ── Operation ADs: generated BEFORE the design review ─────────────────────────
+
+def op_ad_generate_node(state: DesignState) -> dict:
+    """Generate the Operation AD of every new operation so the reviewer sees
+    (and can edit) the real diagrams in the review's Dynamic View."""
+    ops = [op for op in state.get("new_operations", []) or []
+           if op.get("usecase", state["current_usecase"]) == state["current_usecase"]]
+    if not ops:
+        return {"op_ads": {}}
+    op_ads, warnings = {}, []
+    for op in ops:
+        name = op.get("name", "")
+        try:
+            print(f"[OpAD] Generating AD for: {name}")
+            op_ads[name] = clean_op_ad(llm_call(build_op_ad_prompt(op, state)))
+        except Exception as e:
+            warnings.append(f"Operation AD for {name} could not be generated: {e} - "
+                            f"it will be generated again after Apply.")
+    for w in warnings:
+        print(f"[OpAD] WARNING: {w}")
+    return {"op_ads": op_ads,
+            "design_warnings": list(state.get("design_warnings") or []) + warnings}
+
+
+# ── Fan-out: create Operation ADs in Rhapsody (after apply) ───────────────────
 
 def fan_out_ad_node(state: DesignState):
-    """Fan out operation AD generation — one per new operation."""
-    from langgraph.types import Command as LGCommand
-    ops = [op for op in state.get("new_operations", [])
+    """Create the Operation AD of each new operation on its module's operation.
+    Uses the AD shown/edited in the review; generates one only if missing."""
+    ops = [op for op in state.get("new_operations", []) or []
            if op.get("usecase") == state["current_usecase"]]
-
     if not ops or not state.get("approved"):
         print("[FanOut] No ops to generate ADs for")
         return {}
 
-    print(f"[FanOut] {len(ops)} operation ADs to generate")
-    edited  = state.get("op_ads") or {}
-    results = []
-    # Generate ADs sequentially (no true fan-out in this version)
+    from create_operation_ad import create_operation_ad
+    op_ads  = state.get("op_ads") or {}
+    replace = set(state.get("op_ads_replace") or [])
+    results, errors = [], []
+    try:
+        r = rhapsody_connect.get_active_rhapsody()
+    except Exception as e:
+        return {"errors": [f"Operation ADs: {e}"]}
+
     for op in ops:
-        op_name = op.get("name", "")
+        name = op.get("name", "")
         try:
-            import win32com.client
-            from create_operation_ad import create_operation_ad
-
-            if (edited.get(op_name) or "").strip():
-                print(f"[FanOut] Using reviewer-edited AD for: {op_name}")
-                mermaid = edited[op_name]
+            mermaid = op_ads.get(name) or ""
+            if not mermaid.strip():
+                print(f"[FanOut] Generating AD for: {name}")
+                mermaid = clean_op_ad(llm_call(build_op_ad_prompt(op, state)))
             else:
-                prompt = OP_AD_PROMPT.format(
-                    op_name    = op_name,
-                    arguments  = json.dumps(op.get("arguments", []), indent=2),
-                    return_type= op.get("return_type", "void"),
-                    rationale  = op.get("rationale", ""),
-                    req_ids    = ", ".join(op.get("req_ids", [])),
-                    updated_ad = state.get("updated_ad", ""),
-                )
-                print(f"[FanOut] Generating AD for: {op_name}")
-                mermaid = _with_flowchart_header(llm_call(prompt))
-            if "```" in mermaid:
-                mermaid = "\n".join(l for l in mermaid.split("\n")
-                                    if not l.strip().startswith("```"))
-            mermaid = _sanitize_mermaid(mermaid)
-
-            r = rhapsody_connect.get_active_rhapsody()
-            result = create_operation_ad(state["component_name"], op_name, mermaid, r)
-            print(f"[FanOut] {op_name}: {result.get('success')}")
-            results.append({"operation": op_name, "result": result})
+                mermaid = clean_op_ad(mermaid)
+            res = create_operation_ad(state["component_name"], name, mermaid, r,
+                                      module=op.get("module"), replace=name in replace)
         except Exception as e:
-            print(f"[FanOut] ERROR {op_name}: {e}")
-            results.append({"operation": op_name, "error": str(e)})
+            res = {"success": False, "errors": [f"{e}"]}
+        print(f"[FanOut] {name}: {res}")
+        results.append({"operation": name, "result": res})
+        for err in res.get("errors", []) or ([res["error"]] if res.get("error") else []):
+            errors.append(f"Operation AD {name}: {err}")
 
-    return {"operation_ads": results, "op_ads": {}}
-
-
-# ── Phase 4: Operation AD ─────────────────────────────────────────────────────
-
-def op_ad_prompt_node(state: OpADState) -> dict:
-    op = state["operation"]
-    return {
-        "current_phase": "op_ad",
-        "llm_prompt"  : OP_AD_PROMPT.format(
-            op_name    = op.get("name", ""),
-            arguments  = json.dumps(op.get("arguments", []), indent=2),
-            return_type= op.get("return_type", "void"),
-            rationale  = op.get("rationale", ""),
-            req_ids    = ", ".join(op.get("req_ids", [])),
-            updated_ad = state.get("updated_ad", ""),
-        ),
-    }
+    return {"operation_ads": results, "errors": errors, "op_ads": {}, "op_ads_replace": []}
 
 
 def _with_flowchart_header(text: str) -> str:
@@ -1430,33 +1486,6 @@ def _sanitize_mermaid(text: str) -> str:
     """Remove square brackets from edge labels: -->|[Yes]| → -->|Yes|"""
     import re
     return re.sub(r'\|\[([^\]]*)\]\|', r'|\1|', text)
-
-
-def op_ad_parse_node(state: OpADState) -> dict:
-    mermaid = "flowchart TD\n" + state["llm_response"].strip()
-    if "```" in mermaid:
-        lines   = mermaid.split("\n")
-        mermaid = "\n".join(l for l in lines if not l.startswith("```"))
-    mermaid = _sanitize_mermaid(mermaid)
-    return {"llm_response": mermaid}   # reuse field as parsed output
-
-
-def apply_op_ad_node(state: OpADState) -> dict:
-    op      = state["operation"]
-    mermaid = state["llm_response"]
-    name    = op.get("name", "")
-    print(f"[ApplyOpAD] Creating AD for: {name}")
-    try:
-        import win32com.client
-        from create_operation_ad import create_operation_ad
-        r      = rhapsody_connect.get_active_rhapsody()
-        result = create_operation_ad(
-            state["component_name"], name, mermaid, r)
-        print(f"[ApplyOpAD] {name}: {result.get('success')}")
-        return {"operation_ads": [{"operation": name, "result": result}]}
-    except Exception as e:
-        print(f"[ApplyOpAD] ERROR {name}: {e}")
-        return {"operation_ads": [{"operation": name, "error": str(e)}]}
 
 
 # ── Next Use Case ─────────────────────────────────────────────────────────────
@@ -1576,11 +1605,8 @@ def build_graph():
     g.add_node("apply_node",                 apply_node)
 
     # Phase 4 fan-out
+    g.add_node("op_ad_generate_node",        op_ad_generate_node)
     g.add_node("fan_out_ad_node",            fan_out_ad_node)
-    g.add_node("op_ad_prompt_node",          op_ad_prompt_node)
-    g.add_node("op_ad_llm_node",             llm_node)
-    g.add_node("op_ad_parse_node",           op_ad_parse_node)
-    g.add_node("apply_op_ad_node",           apply_op_ad_node)
 
     g.add_node("next_usecase_node",          next_usecase_node)
 
@@ -1621,7 +1647,8 @@ def build_graph():
         "design_ibd_parse_node": "design_ibd_parse_node",
     })
     g.add_edge("design_ibd_llm_node",        "design_ibd_parse_node")
-    g.add_edge("design_ibd_parse_node",      "human_review_node")
+    g.add_edge("design_ibd_parse_node",      "op_ad_generate_node")
+    g.add_edge("op_ad_generate_node",        "human_review_node")
 
     # Review
     g.add_conditional_edges("human_review_node", route_after_review, {
@@ -1633,10 +1660,6 @@ def build_graph():
     g.add_edge("apply_node",                 "fan_out_ad_node")
     g.add_edge("fan_out_ad_node",            "next_usecase_node")
 
-    # Phase 4
-    g.add_edge("op_ad_prompt_node",          "op_ad_llm_node")
-    g.add_edge("op_ad_llm_node",             "op_ad_parse_node")
-    g.add_edge("op_ad_parse_node",           "apply_op_ad_node")
 
     # Loop
     g.add_conditional_edges("next_usecase_node", route_after_next, {

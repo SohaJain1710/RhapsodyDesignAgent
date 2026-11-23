@@ -116,6 +116,7 @@ def normalize_edits(edits: dict, component_name: str, usecase: str = "",
                            "generalizations": []},
         "ibd_delta"     : {"ports": iv["ports"], "links": iv["links"]},
         "op_ads"        : op_ads,
+        "op_ads_replace": [n for n in (edits.get("op_ads_edited") or []) if n in op_ads],
         "warnings"      : v["warnings"] + iv["warnings"],
         "ibd_name"      : edits.get("ibd_name") or "",
         "module_names"  : module_names,
@@ -182,65 +183,41 @@ def apply_design_state(state: dict, component_name: str) -> dict:
             }, r)
             errors.extend(res.get("errors") or ([res["error"]] if res.get("error") else []))
 
-        # Operation ADs from webview editor — processed AFTER operations are created
-        op_ads_map = state.get("op_ads", {})
-        if op_ads_map:
+        # Operation ADs — AFTER the operations exist. Use the AD shown/edited in the
+        # review; generate missing ones only when the LLM relay is running.
+        from create_operation_ad import create_operation_ad
+        op_ads_map = state.get("op_ads", {}) or {}
+        replace    = set(state.get("op_ads_replace") or [])
+        missing = [op for op in new_ops if not (op_ads_map.get(op.get("name")) or "").strip()]
+        relay_available = False
+        if missing:
             try:
-                from create_operation_ad import create_operation_ad
-                for op_name, mermaid in op_ads_map.items():
-                    if not mermaid or not mermaid.strip():
+                import urllib.request
+                urllib.request.urlopen(urllib.request.Request(
+                    "http://127.0.0.1:3000/v1/chat/completions", data=b'{}',
+                    headers={"Content-Type": "application/json"}, method="POST"), timeout=2)
+                relay_available = True
+            except Exception:
+                errors.append(f"Operation ADs not generated for {[o.get('name') for o in missing]}: "
+                              f"LLM relay not available")
+        from design_graph_unified import build_op_ad_prompt, clean_op_ad
+        for op in new_ops:
+            name = op.get("name", "")
+            mermaid = op_ads_map.get(name) or ""
+            try:
+                if not mermaid.strip():
+                    if not relay_available:
                         continue
-                    ad_result = create_operation_ad(component_name, op_name, mermaid, r)
-                    op_ads.append({"operation": op_name, "result": ad_result})
-                    print(f"[ApplyDirect] Op AD {op_name}: {ad_result.get('success')}", file=sys.stderr)
+                    from llm_node import llm_call
+                    mermaid = llm_call(build_op_ad_prompt(op, state))
+                res = create_operation_ad(component_name, name, clean_op_ad(mermaid), r,
+                                          module=op.get("module"), replace=name in replace)
             except Exception as e:
-                print(f"[ApplyDirect] Op AD error: {e}", file=sys.stderr)
-                errors.append(f"op_ad: {e}")
-
-        # Operation ADs — only when LLM relay is running
-        try:
-            import urllib.request, urllib.error
-            req = urllib.request.Request(
-                "http://127.0.0.1:3000/v1/chat/completions",
-                data=b'{}', headers={"Content-Type": "application/json"},
-                method="POST"
-            )
-            urllib.request.urlopen(req, timeout=2)
-            relay_available = True
-        except:
-            relay_available = False
-            print("[ApplyDirect] LLM relay not available — skipping operation ADs", file=sys.stderr)
-
-        if relay_available and new_ops:
-            from llm_node import llm_call
-            from create_operation_ad import create_operation_ad
-            from design_graph_unified import OP_AD_PROMPT
-            import json as _j
-
-            already_done = {o["operation"] for o in op_ads if o.get("operation")}
-            for op in new_ops:
-                if op.get("name") in already_done:
-                    continue   # reviewer-edited AD already created above
-                try:
-                    prompt = OP_AD_PROMPT.format(
-                        op_name    = op.get("name",""),
-                        arguments  = _j.dumps(op.get("arguments",[]), indent=2),
-                        return_type= op.get("return_type","void"),
-                        rationale  = op.get("rationale",""),
-                        req_ids    = ", ".join(op.get("req_ids",[])),
-                        updated_ad = state.get("updated_ad",""),
-                    )
-                    from design_graph_unified import _with_flowchart_header
-                    mermaid = _with_flowchart_header(llm_call(prompt))
-                    if "```" in mermaid:
-                        mermaid = "\n".join(l for l in mermaid.split("\n")
-                                            if not l.strip().startswith("```"))
-                    result = create_operation_ad(component_name, op["name"], mermaid, r)
-                    op_ads.append({"operation": op["name"], "result": result})
-                    print(f"[ApplyDirect] Op AD: {op['name']} → {result.get('success')}", file=sys.stderr)
-                except Exception as e:
-                    print(f"[ApplyDirect] Op AD error {op.get('name')}: {e}", file=sys.stderr)
-                    op_ads.append({"operation": op.get("name",""), "error": str(e)})
+                res = {"success": False, "errors": [str(e)]}
+            op_ads.append({"operation": name, "result": res})
+            for err in res.get("errors", []) or []:
+                errors.append(f"Operation AD {name}: {err}")
+            print(f"[ApplyDirect] Op AD {name}: {res}", file=sys.stderr)
 
     except Exception as e:
         import traceback
