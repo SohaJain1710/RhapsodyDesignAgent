@@ -105,6 +105,21 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "  OK: Packages installed"
 
+# Optional: SQLite checkpointer for pause/resume. If it cannot be installed
+# (e.g. not available on the package mirror), the agent falls back to a
+# built-in file-based checkpointer, so setup must NOT fail here.
+Write-Host "  Installing optional package langgraph-checkpoint-sqlite..."
+if ($USING_VENV) {
+    & $PIP install "langgraph-checkpoint-sqlite>=2.0.0" --quiet 2>&1 | Out-Null
+} else {
+    & $PYTHON -m pip install "langgraph-checkpoint-sqlite>=2.0.0" --user --quiet 2>&1 | Out-Null
+}
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "  OK: langgraph-checkpoint-sqlite installed"
+} else {
+    Write-Host "  NOTE: langgraph-checkpoint-sqlite not available - using built-in file checkpointer (works the same)" -ForegroundColor DarkYellow
+}
+
 $POSTINSTALL = Join-Path $VENV "Scripts\pywin32_postinstall.py"
 if (Test-Path $POSTINSTALL) {
     & $PY $POSTINSTALL 2>&1 | Out-Null
