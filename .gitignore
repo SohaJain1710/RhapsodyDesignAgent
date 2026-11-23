@@ -12,3 +12,5 @@ llm_response.json
 llm_error.json
 node_modules/
 *.vsix
+python/
+build/

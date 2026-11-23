@@ -135,7 +135,7 @@ New-Item -ItemType Directory -Path $EXTSRC -Force | Out-Null
 
 $SRC = Join-Path $ROOT "src"
 Copy-Item (Join-Path $SRC "extension.js") (Join-Path $EXTSRC "extension.js") -Force
-Copy-Item (Join-Path $SRC "package.json") (Join-Path $EXT "package.json") -Force
+Copy-Item (Join-Path $ROOT "package.json") (Join-Path $EXT "package.json") -Force
 Write-Host "  OK: Extension files copied"
 
 # node_modules
@@ -174,6 +174,8 @@ $CFG = "{`"tools_path`":`"$TOOLS`",`"python_path`":`"$PYESC`",`"runtime_dir`":`"
 # Write UTF-8 WITHOUT BOM: Windows PowerShell's "-Encoding UTF8" adds a BOM, which
 # makes Python's json.load fail so config.json was silently ignored
 [System.IO.File]::WriteAllText((Join-Path $ROOT "config.json"), $CFG, (New-Object System.Text.UTF8Encoding $false))
+# The extension reads config.json from its own folder (python_path, runtime_dir)
+Copy-Item (Join-Path $ROOT "config.json") (Join-Path $EXT "config.json") -Force
 Write-Host "  OK: config.json written"
 
 $EXTJS = Join-Path $EXTSRC "extension.js"
@@ -182,11 +184,9 @@ $ROOTESC = $ROOT -replace "\\","\\\\"
 $PYESC2  = $PY   -replace "\\","\\\\"
 # Patch ROOT_DIR - replace the entire self-invoking function with a fixed string
 $JS = $JS -replace "(?s)const ROOT_DIR = \(\(\) => \{.+?\}\)\(\);","const ROOT_DIR = '$ROOTESC';"
-# Patch PYTHON path
-$JS = $JS -replace "const PYTHON = [^;`r`n]+;","const PYTHON = '$PYESC2';"
 # Write UTF-8 without BOM so unicode icons render correctly in VS Code
 [System.IO.File]::WriteAllText($EXTJS, $JS, (New-Object System.Text.UTF8Encoding $false))
-Write-Host "  OK: extension.js patched (ROOT_DIR + PYTHON, UTF-8 no BOM)"
+Write-Host "  OK: extension.js patched (ROOT_DIR, UTF-8 no BOM)"
 
 Write-Host ""
 Write-Host "Setup Complete!" -ForegroundColor Green

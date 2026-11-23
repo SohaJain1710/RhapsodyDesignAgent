@@ -1,0 +1,18 @@
+# Only ship what the extension needs at runtime:
+#   package.json, README.md, src/extension.js, tools/*.py, requirements.txt, node_modules (express)
+.git/**
+.gitignore
+.github/**
+.vscode/**
+.venv/**
+**/__pycache__/**
+**/*.pyc
+**/*.vsix
+**/*.log
+**/*.db
+src/node_modules.zip
+config.json
+setup.ps1
+install.bat
+INSTALLATION.md
+package-lock.json

@@ -7,25 +7,58 @@ const fs = require('fs');
 const express = require('express');
 
 // ── Paths ────────────────────────────────────────────────────────────────
-// ROOT_DIR auto-configured by setup.ps1 — fallback uses extension location
+// Resolution order (first hit wins):
+//   1. VS Code settings  (rhapsody.toolsRoot / rhapsody.pythonPath / rhapsody.runtimeDir)
+//   2. Python bundled inside the VSIX (python/python.exe, all packages pre-installed)
+//   3. config.json next to the extension (legacy, written by setup.ps1)
+//   4. Defaults: tools bundled inside the VSIX, managed venv created by
+//      "Rhapsody: Set Up Python Environment", C:\RhapsodyAIAgent_runtime
+const os = require('os');
+const IS_WIN = process.platform === 'win32';
+const EXT_DIR = path.join(__dirname, '..');
+
+function readLegacyConfig() {
+    try { return JSON.parse(fs.readFileSync(path.join(EXT_DIR, 'config.json'), 'utf8').replace(/^\uFEFF/, '')); }
+    catch { return {}; }
+}
+function setting(key) {
+    const v = vscode.workspace.getConfiguration('rhapsody').get(key);
+    return typeof v === 'string' && v.trim() ? v.trim() : '';
+}
+
 const ROOT_DIR = (() => {
-    const p = require('path');
-    // config.json written by setup.ps1 contains the actual path
-    const cfgFile = p.join(__dirname, '..', 'config.json');
-    try {
-        return JSON.parse(require('fs').readFileSync(cfgFile, 'utf8')).tools_path
-               ? p.dirname(JSON.parse(require('fs').readFileSync(cfgFile, 'utf8')).tools_path)
-               : p.join(__dirname, '..');
-    } catch { return p.join(__dirname, '..'); }
+    const fromSetting = setting('toolsRoot');
+    if (fromSetting) return fromSetting;
+    const tp = readLegacyConfig().tools_path;
+    return tp ? path.dirname(tp) : EXT_DIR;
 })();
-const PYTHON = path.join(ROOT_DIR, '.venv', 'Scripts', 'python.exe');
+
+// Managed venv lives outside the extension folder so it survives VSIX upgrades.
+const MANAGED_VENV = path.join(
+    IS_WIN ? (process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')) : path.join(os.homedir(), '.local', 'share'),
+    'RhapsodyAIAgent', '.venv');
+const venvPython = venv => IS_WIN ? path.join(venv, 'Scripts', 'python.exe') : path.join(venv, 'bin', 'python');
+
+// Self-contained Python + all packages shipped inside the VSIX (scripts/bundle_python.py).
+const BUNDLED_PYTHON = path.join(EXT_DIR, 'python', IS_WIN ? 'python.exe' : 'bin/python3');
+
+// Re-resolved on every call so a freshly created venv is picked up without a reload.
+function getPython() {
+    const fromSetting = setting('pythonPath');
+    if (fromSetting) return fromSetting;
+    if (fs.existsSync(BUNDLED_PYTHON)) return BUNDLED_PYTHON;
+    const legacy = readLegacyConfig().python_path;
+    if (legacy && fs.existsSync(legacy)) return legacy;
+    for (const venv of [MANAGED_VENV, path.join(ROOT_DIR, '.venv')]) {
+        if (fs.existsSync(venvPython(venv))) return venvPython(venv);
+    }
+    return null;
+}
+
 // Write-heavy runtime files live OUTSIDE OneDrive to avoid sync-lock conflicts
 // with actively-written files (SQLite, temp JSON).
-const RUNTIME_DIR = (() => {
-    const cfgFile = require('path').join(__dirname, '..', 'config.json');
-    try { return JSON.parse(require('fs').readFileSync(cfgFile, 'utf8')).runtime_dir || 'C:\\RhapsodyAIAgent_runtime'; }
-    catch { return 'C:\\RhapsodyAIAgent_runtime'; }
-})();
+const RUNTIME_DIR = setting('runtimeDir') || readLegacyConfig().runtime_dir ||
+    (IS_WIN ? 'C:\\RhapsodyAIAgent_runtime' : path.join(os.homedir(), 'RhapsodyAIAgent_runtime'));
 if (!fs.existsSync(RUNTIME_DIR)) { fs.mkdirSync(RUNTIME_DIR, { recursive: true }); }
 
 const UNIFIED_GRAPH = path.join(ROOT_DIR, 'tools', 'design_graph_unified.py');
@@ -87,9 +120,14 @@ function startLmProxy(outputChannel) {
 // ── Python runner ────────────────────────────────────────────────────────
 function runPython(scriptPath, args) {
     return new Promise((resolve, reject) => {
-        const proc = spawn(PYTHON, [scriptPath, ...args], {
+        const python = getPython();
+        if (!python) {
+            promptPythonSetup();
+            return reject(new Error('Python environment not set up. Run "Rhapsody: Set Up Python Environment" from the Command Palette.'));
+        }
+        const proc = spawn(python, [scriptPath, ...args], {
             cwd: ROOT_DIR,
-            env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
+            env: { ...process.env, PYTHONIOENCODING: 'utf-8', RHAPSODY_RUNTIME_DIR: RUNTIME_DIR }
         });
 
         let stdout = '';
@@ -101,7 +139,7 @@ function runPython(scriptPath, args) {
             if (code === 0) resolve({ stdout, stderr });
             else reject(new Error(stderr || stdout));
         });
-        proc.on('error', err => reject(new Error(`Failed to start Python: ${err.message}`)));
+        proc.on('error', err => reject(new Error(`Failed to start Python (${python}): ${err.message}`)));
     });
 }
 
@@ -1240,6 +1278,90 @@ async function handleRhapsodyChat(request, context, stream, token) {
     await runUnifiedGraph(intent.component, [], { requirementSource: source }, undefined, stream, token);
 }
 
+// ── Python environment setup ─────────────────────────────────────────────
+// Creates a venv at MANAGED_VENV and installs requirements.txt bundled in the
+// VSIX. Replaces the manual setup.ps1 steps for VSIX installs.
+let setupPromptShown = false;
+function promptPythonSetup() {
+    if (setupPromptShown) return;
+    setupPromptShown = true;
+    vscode.window.showWarningMessage(
+        'Rhapsody Model Assistant needs a Python environment (one-time setup).',
+        'Set Up Now', 'Open Settings'
+    ).then(choice => {
+        setupPromptShown = false;
+        if (choice === 'Set Up Now') vscode.commands.executeCommand('rhapsody.setupPython');
+        else if (choice === 'Open Settings') vscode.commands.executeCommand('workbench.action.openSettings', 'rhapsody.pythonPath');
+    });
+}
+
+function execLogged(cmd, args, opts = {}) {
+    return new Promise((resolve, reject) => {
+        outputChannel.appendLine(`> ${cmd} ${args.join(' ')}`);
+        const proc = spawn(cmd, args, { ...opts, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
+        let out = '';
+        proc.stdout.on('data', d => { out += d; outputChannel.append(d.toString()); });
+        proc.stderr.on('data', d => { out += d; outputChannel.append(d.toString()); });
+        proc.on('error', reject);
+        proc.on('close', code => code === 0 ? resolve(out) : reject(new Error(`${cmd} exited with code ${code}`)));
+    });
+}
+
+async function findBasePython() {
+    const configured = setting('basePythonPath');
+    const candidates = configured ? [[configured, []]]
+        : IS_WIN ? [['py', ['-3']], ['python', []], ['python3', []]]
+                 : [['python3', []], ['python', []]];
+    for (const [cmd, pre] of candidates) {
+        try {
+            const out = await execLogged(cmd, [...pre, '-c', 'import sys; print(sys.version_info[:2] >= (3, 10))']);
+            if (out.trim().endsWith('True')) return [cmd, pre];
+            outputChannel.appendLine(`  ${cmd}: Python too old (need 3.10+)`);
+        } catch { /* try next */ }
+    }
+    return null;
+}
+
+async function setupPythonEnvironment() {
+    outputChannel.show(true);
+    return vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: 'Rhapsody: Setting up Python environment',
+        cancellable: false,
+    }, async progress => {
+        try {
+            progress.report({ message: 'Looking for Python 3.10+…' });
+            const base = await findBasePython();
+            if (!base) {
+                const pick = await vscode.window.showErrorMessage(
+                    'Python 3.10+ not found. Install Python (tick "Add to PATH") or set "rhapsody.basePythonPath".',
+                    'Open Settings');
+                if (pick) vscode.commands.executeCommand('workbench.action.openSettings', 'rhapsody.basePythonPath');
+                return;
+            }
+            const py = venvPython(MANAGED_VENV);
+            if (!fs.existsSync(py)) {
+                progress.report({ message: `Creating venv at ${MANAGED_VENV}…` });
+                fs.mkdirSync(path.dirname(MANAGED_VENV), { recursive: true });
+                await execLogged(base[0], [...base[1], '-m', 'venv', MANAGED_VENV]);
+            }
+            progress.report({ message: 'Installing packages (1-3 minutes)…' });
+            await execLogged(py, ['-m', 'pip', 'install', '--upgrade', 'pip']);
+            await execLogged(py, ['-m', 'pip', 'install', '-r', path.join(EXT_DIR, 'requirements.txt')]);
+            if (IS_WIN) {
+                const post = path.join(MANAGED_VENV, 'Scripts', 'pywin32_postinstall.py');
+                if (fs.existsSync(post)) {
+                    try { await execLogged(py, [post, '-install']); }
+                    catch (e) { outputChannel.appendLine(`[setup] pywin32 postinstall warning: ${e.message}`); }
+                }
+            }
+            vscode.window.showInformationMessage(`Rhapsody: Python environment ready (${py}).`);
+        } catch (err) {
+            vscode.window.showErrorMessage(`Rhapsody: Python setup failed — ${err.message}. See the "Rhapsody DD Generator" output for details.`);
+        }
+    });
+}
+
 // ── Extension activation ─────────────────────────────────────────────────
 // NOTE: register "rhapsody.design.source" in package.json commands array
 function activate(context) {
@@ -1316,6 +1438,15 @@ function activate(context) {
         }
     );
     context.subscriptions.push(reviewAdCmd);
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('rhapsody.setupPython', setupPythonEnvironment));
+
+    const py = getPython();
+    outputChannel.appendLine(`[Rhapsody] tools: ${ROOT_DIR}`);
+    outputChannel.appendLine(`[Rhapsody] python: ${py || '(not set up)'}`);
+    outputChannel.appendLine(`[Rhapsody] runtime: ${RUNTIME_DIR}`);
+    if (!py) promptPythonSetup();
 
     outputChannel.appendLine('[Rhapsody] Extension activated (LM proxy on :3000)');
 }

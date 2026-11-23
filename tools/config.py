@@ -21,7 +21,11 @@ if os.path.exists(_CONFIG_FILE):
         pass
 
 # ── Public constants ──────────────────────────────────────────────────────────
-RUNTIME_DIR = _cfg.get("runtime_dir", r"C:\RhapsodyAIAgent_runtime")
+# RHAPSODY_RUNTIME_DIR is set by the VS Code extension (VSIX installs).
+RUNTIME_DIR = (os.environ.get("RHAPSODY_RUNTIME_DIR")
+               or _cfg.get("runtime_dir")
+               or (r"C:\RhapsodyAIAgent_runtime" if os.name == "nt"
+                   else os.path.join(os.path.expanduser("~"), "RhapsodyAIAgent_runtime")))
 TOOLS_PATH  = _cfg.get("tools_path",  _HERE)
 PYTHON_PATH = _cfg.get("python_path", "python")
 
