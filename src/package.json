@@ -26,7 +26,7 @@
       },
       {
         "command": "rhapsody.design.review",
-        "title": "Rhapsody: Review & Edit Design"
+        "title": "Rhapsody: Open Design Review Editor"
       },
       {
         "command": "rhapsody.design.reviewAd",
@@ -59,7 +59,7 @@
   "scripts": {
     "test": "echo no test"
   },
-  "author": "",
+  "author": "JIO2KOR",
   "license": "ISC",
   "repository": {
     "type": "git",

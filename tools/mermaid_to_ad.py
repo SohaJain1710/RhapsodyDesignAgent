@@ -34,6 +34,10 @@ _RE_STADIUM  = re.compile(r'^(\w+)\(\[([^\]]*)\]\)$')
 # Match: id(label)                   → rounded (treat as action)
 _RE_ROUNDED  = re.compile(r'^(\w+)\(([^)]+)\)$')
 
+_RE_INLINE_NODE = re.compile(
+    r'''\b\w+(?:\["[^"]*"\]|\['[^']*'\]|\{"[^"]*"\}|\{'[^']*'\}|\{[^}]*\}|\(\([^)]*\)\)|\(\[[^\]]*\]\)|\([^)]*\))'''
+)
+
 # ── Edge pattern matchers ─────────────────────────────────────────────────
 # a --> b
 _RE_EDGE       = re.compile(r'^(\w+)\s*-->\s*(\w+)$')
@@ -63,6 +67,14 @@ def _parse_node_line(line: str) -> tuple[str, str, str] | None:
         if m:
             node_id = m.group(1)
             label   = m.group(2).replace("\\n", "\n").strip()
+            if ntype == "decision" and label[:1] in ('"', "'") \
+                    and label[-1:] == label[:1]:
+                label = label[1:-1]
+            if ntype == "merge":
+                if node_id.lower() in ("start", "initial") or label.lower() == "start":
+                    ntype = "initial"
+                elif node_id.lower() in ("stop", "end", "final") or label.lower() == "end":
+                    ntype = "final"
             return node_id, label, ntype
 
     # Check stadium before rounded (([label]) must match before (label))
@@ -179,20 +191,28 @@ def from_mermaid(
                     nodes.setdefault(nid, {})["allocated_module"] = module
             continue
 
-        # Try edge first (edges contain --> which can look like nodes)
+        def register_node(match):
+            node = _parse_node_line(match.group(0))
+            if node is None:
+                return match.group(0)
+            nid, label, ntype = node
+            nodes.setdefault(nid, {}).update({"label": label, "type": ntype})
+            return nid
+
+        line = _RE_INLINE_NODE.sub(register_node, line)
         edge = _parse_edge_line(line)
         if edge:
             src, tgt, guard = edge
             edges.append({"from": src, "to": tgt, "guard": guard})
             # Register bare node ids if not yet seen
             for nid in (src, tgt):
-                if nid not in nodes:
+                if "type" not in nodes.get(nid, {}):
                     if "initial" in nid.lower() or nid == "initial":
-                        nodes[nid] = {"label": "start", "type": "initial"}
+                        nodes.setdefault(nid, {}).update({"label": "start", "type": "initial"})
                     elif any(x in nid.lower() for x in ["final", "activityfinal", "end"]):
-                        nodes[nid] = {"label": "end", "type": "final"}
+                        nodes.setdefault(nid, {}).update({"label": "end", "type": "final"})
                     else:
-                        nodes[nid] = {"label": nid, "type": "action"}
+                        nodes.setdefault(nid, {}).update({"label": nid, "type": "action"})
             continue
 
         node = _parse_node_line(line)
@@ -206,6 +226,18 @@ def from_mermaid(
             if any(x in nid.lower() for x in ["activityfinal", "flowfinal",
                                                "final", "end_"]):
                 nodes[nid]["type"] = "final"
+
+    for nid, info in list(nodes.items()):
+        incoming = [edge for edge in edges if edge["to"] == nid]
+        if info["type"] != "decision" or len(incoming) < 2:
+            continue
+        merge_id = f"merge_before_{nid}"
+        while merge_id in nodes:
+            merge_id += "_merge"
+        nodes[merge_id] = {"label": merge_id, "type": "merge"}
+        for edge in incoming:
+            edge["to"] = merge_id
+        edges.append({"from": merge_id, "to": nid, "guard": ""})
 
     # ── Build actions list ────────────────────────────────────────────────
     actions    = []
