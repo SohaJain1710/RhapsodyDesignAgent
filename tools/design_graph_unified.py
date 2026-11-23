@@ -74,16 +74,21 @@ class DesignState(TypedDict):
 
     # Phase outputs
     updated_ad       : str         # Phase 2a
-    new_operations   : Annotated[list, operator.add]   # Phase 2b
-    new_interfaces   : Annotated[list, operator.add]   # Phase 2b
+    # Per-use-case proposals: overwritten (not accumulated) so a re-run after
+    # reviewer feedback, or the next use case, does not duplicate/re-apply them.
+    new_operations   : list        # Phase 2b
+    new_interfaces   : list        # Phase 2b
     action_op_map    : dict        # Phase 2b
     bdd_delta        : dict        # Phase 2b
     ibd_delta        : dict        # Phase 3
     operation_ads    : Annotated[list, operator.add]   # Phase 4
+    applied_usecases : Annotated[list, operator.add]   # use cases written to Rhapsody
 
     # Control
     approved         : bool
-    human_feedback   : str
+    human_feedback   : str         # feedback from full design review (HITL #2)
+    ad_feedback      : str         # feedback from Analysis AD review (HITL #1)
+    op_ads           : dict        # {op_name → mermaid} edited by the reviewer
     errors           : Annotated[list, operator.add]
 
 
@@ -542,6 +547,12 @@ def pick_usecase_node(state: DesignState) -> dict:
         "ibd_delta"        : {},
         "bdd_delta"        : {},
         "action_op_map"    : {},
+        "new_operations"   : [],
+        "new_interfaces"   : [],
+        "op_ads"           : {},
+        "ad_feedback"      : "",
+        "human_feedback"   : "",
+        "approved"         : False,
         "llm_prompt"       : "",
         "llm_response"     : "",
     }
@@ -671,14 +682,27 @@ def update_ad_prompt_node(state: DesignState) -> dict:
     else:
         req_links = "(No requirement links found in existing AD)"
 
+    prompt = UPDATE_AD_PROMPT.format(
+        usecase     = state["current_usecase"],
+        requirements= req_text,
+        existing_ad = flowchart_only,
+        req_links   = req_links,
+    )
+
+    # Re-run after the reviewer rejected the previous proposal (HITL #1)
+    feedback = (state.get("ad_feedback") or "").strip()
+    if feedback:
+        prompt += (
+            "\n\n# Reviewer Feedback on Your Previous Proposal\n"
+            "Your previous proposal was:\n"
+            f"{state.get('updated_ad', '')}\n\n"
+            f"The reviewer rejected it with this feedback:\n{feedback}\n\n"
+            "Revise the diagram to address the feedback. Do NOT reply NO_CHANGE.\n"
+        )
+
     return {
         "current_phase": "update_ad",
-        "llm_prompt"  : UPDATE_AD_PROMPT.format(
-            usecase     = state["current_usecase"],
-            requirements= req_text,
-            existing_ad = flowchart_only,
-            req_links   = req_links,
-        ),
+        "llm_prompt"  : prompt,
     }
 
 
@@ -757,15 +781,31 @@ def update_ad_parse_node(state: DesignState) -> dict:
 def design_elements_prompt_node(state: DesignState) -> dict:
     req_text = "\n".join(f"- {r['id']}: {r.get('text', r.get('shall',''))}"
                          for r in state["current_reqs"])
+    prompt = DESIGN_ELEMENTS_PROMPT.format(
+        usecase        = state["current_usecase"],
+        requirements   = req_text,
+        updated_ad     = state["updated_ad"],
+        bdd_dd         = state["bdd_dd"],
+        bdd_interfaces = state["bdd_interfaces"],
+    )
+
+    # Re-run after the reviewer rejected the previous design (HITL #2)
+    feedback = (state.get("human_feedback") or "").strip()
+    if feedback:
+        prompt += (
+            "\n\n# Reviewer Feedback on Your Previous Proposal\n"
+            "Previous proposal:\n"
+            + json.dumps({
+                "new_operations": state.get("new_operations", []),
+                "new_interfaces": state.get("new_interfaces", []),
+            }, indent=2)
+            + f"\n\nThe reviewer rejected it with this feedback:\n{feedback}\n\n"
+            "Revise the proposal to address the feedback.\n"
+        )
+
     return {
         "current_phase": "design_elements",
-        "llm_prompt"  : DESIGN_ELEMENTS_PROMPT.format(
-            usecase        = state["current_usecase"],
-            requirements   = req_text,
-            updated_ad     = state["updated_ad"],
-            bdd_dd         = state["bdd_dd"],
-            bdd_interfaces = state["bdd_interfaces"],
-        ),
+        "llm_prompt"  : prompt,
     }
 
 
@@ -817,11 +857,38 @@ def design_ibd_parse_node(state: DesignState) -> dict:
     return {"ibd_delta": result}
 
 
-# ── Human Review — Analysis AD ───────────────────────────────────────────────
+# ── Human Review — helpers ────────────────────────────────────────────────────
+
+_APPROVE_WORDS = ("approve", "approved", "apply", "yes", "ok", "continue")
+
+
+def _clean_mermaid_flowchart(text: str) -> str:
+    """Strip fences, sanitize edge labels and normalize to 'graph TD/LR'."""
+    lines = [l for l in (text or "").strip().splitlines()
+             if not l.strip().startswith("```")]
+    flow = _sanitize_mermaid("\n".join(lines).strip())
+    return flow.replace("flowchart TD", "graph TD").replace("flowchart LR", "graph LR")
+
+
+def _looks_like_flowchart(text: str) -> bool:
+    body = "\n".join(l for l in (text or "").strip().splitlines()
+                     if not l.strip().startswith("```")).lstrip()
+    return body.startswith(("flowchart", "graph"))
+
+
+# ── Human Review — Analysis AD (HITL #1) ─────────────────────────────────────
 
 def human_review_ad_node(state: DesignState) -> dict:
     """Pause after the Analysis AD update so the human can approve or correct it
-    before the pipeline continues to design operations, interfaces, and IBD."""
+    before the pipeline continues to design operations, interfaces, and IBD.
+
+    Accepted resume values:
+      "approve" / "apply" / ...         → approve the AD as proposed
+      "<mermaid flowchart>"             → approve the reviewer's corrected AD
+      "<free text>"                     → reject; regenerate the AD with this feedback
+      {"approved": true,  "updated_ad": "...", "req_map": {...}}  → approve (optionally edited)
+      {"approved": false, "feedback": "..."}                       → reject with feedback
+    """
     print(f"\n[HumanReviewAD] Use case: {state['current_usecase']}")
     print(f"  Updated AD length: {len(state.get('updated_ad',''))}")
 
@@ -833,33 +900,53 @@ def human_review_ad_node(state: DesignState) -> dict:
         "req_map"    : state.get("existing_req_map", {}),
         "message"    : (
             "Review the updated Analysis Activity Diagram. "
-            "Reply 'approve' to continue, or provide corrected Mermaid text."
+            "Approve it, edit it, or give feedback to regenerate it."
         ),
     })
 
+    approved, corrected_ad, req_map, fb_text = False, "", None, ""
     if isinstance(feedback, str):
-        approved = feedback.strip().lower() in ("approve", "apply", "yes", "ok")
-        corrected_ad = "" if approved else feedback.strip()
+        text = feedback.strip()
+        if not text or text.lower() in _APPROVE_WORDS:
+            approved = True
+        elif _looks_like_flowchart(text):
+            approved, corrected_ad = True, text
+        else:
+            fb_text = text
     elif isinstance(feedback, dict):
-        approved = feedback.get("approved", False)
-        corrected_ad = feedback.get("updated_ad", "")
+        approved     = bool(feedback.get("approved", False))
+        corrected_ad = (feedback.get("updated_ad") or "").strip()
+        req_map      = feedback.get("req_map")
+        fb_text      = (feedback.get("feedback") or "").strip()
+        if not approved and not fb_text and corrected_ad:
+            approved = True          # an edited AD without feedback = accept edits
     else:
-        approved = False
-        corrected_ad = ""
+        fb_text = str(feedback or "")
 
-    result: dict = {"approved": approved}
-    if corrected_ad:
-        result["updated_ad"] = corrected_ad
+    if not approved and not fb_text:
+        fb_text = "The reviewer rejected the diagram. Re-check it against the requirements."
+
+    result: dict = {
+        "approved"      : approved,
+        "ad_feedback"   : "" if approved else fb_text,
+        "human_feedback": "",
+    }
+    if approved and corrected_ad:
+        result["updated_ad"] = _clean_mermaid_flowchart(corrected_ad)
+        print(f"[HumanReviewAD] Reviewer supplied corrected AD ({len(result['updated_ad'])} chars)")
+    if approved and isinstance(req_map, dict) and req_map:
+        result["existing_req_map"] = req_map
+    print(f"[HumanReviewAD] approved={approved} feedback={fb_text[:80]!r}")
     return result
 
 
 def route_after_ad_review(state: DesignState) -> str:
     if state.get("approved"):
         return "design_elements_prompt_node"
-    return "update_ad_prompt_node"   # re-run AD generation with implicit feedback
+    return "update_ad_prompt_node"   # regenerate the AD using state['ad_feedback']
 
 
-# ── Human Review — Full Design ────────────────────────────────────────────────
+# ── Human Review — Full Design (HITL #2) ─────────────────────────────────────
 
 def human_review_node(state: DesignState) -> dict:
     print(f"\n[HumanReview] Use case: {state['current_usecase']}")
@@ -868,31 +955,56 @@ def human_review_node(state: DesignState) -> dict:
     print(f"  IBD ports: {len(state.get('ibd_delta',{}).get('ports',[]))}")
 
     feedback = interrupt({
+        "phase"         : "human_review",
         "component"     : state["component_name"],
         "usecase"       : state["current_usecase"],
         "updated_ad"    : state.get("updated_ad", ""),
         "req_map"       : state.get("existing_req_map", {}),
         "new_operations": state.get("new_operations", []),
         "new_interfaces": state.get("new_interfaces", []),
+        "realizations"  : (state.get("bdd_delta") or {}).get("realizations", []),
         "ibd_delta"     : state.get("ibd_delta", {}),
         "message"       : "Review the proposed design changes. Reply 'apply' to approve or provide feedback.",
     })
 
-    # Fix 3: Handle both string resume ("apply") and dict feedback
+    result: dict = {}
     if isinstance(feedback, str):
-        approved = feedback.strip().lower() in ("apply", "approve", "yes", "ok")
+        approved = feedback.strip().lower() in _APPROVE_WORDS
         fb_text  = "" if approved else feedback.strip()
     elif isinstance(feedback, dict):
-        approved = feedback.get("approved", False)
-        fb_text  = feedback.get("feedback", "")
+        approved = bool(feedback.get("approved", False))
+        fb_text  = (feedback.get("feedback") or "").strip()
+        edits    = feedback.get("edits")
+        if approved and isinstance(edits, dict):
+            # Reviewer edited the design in the webview — use the edited version
+            from apply_design import normalize_edits
+            norm = normalize_edits(edits, state["component_name"],
+                                   usecase=state["current_usecase"])
+            result.update({
+                "new_operations": norm["new_operations"],
+                "new_interfaces": norm["new_interfaces"],
+                "bdd_delta"     : norm["bdd_delta"],
+                "ibd_delta"     : norm["ibd_delta"],
+                "op_ads"        : norm["op_ads"],
+            })
+            if norm.get("updated_ad"):
+                result["updated_ad"] = _clean_mermaid_flowchart(norm["updated_ad"])
+            if norm.get("req_map"):
+                result["existing_req_map"] = norm["req_map"]
+            print(f"[HumanReview] Applying reviewer edits: "
+                  f"{len(norm['new_operations'])} ops, {len(norm['new_interfaces'])} intfs")
     else:
         approved = False
         fb_text  = str(feedback)
 
-    return {
+    if not approved and not fb_text:
+        fb_text = "The reviewer rejected the proposal. Re-check it against the requirements."
+
+    result.update({
         "approved"      : approved,
         "human_feedback": fb_text,
-    }
+    })
+    return result
 
 
 # ── Apply to Rhapsody ─────────────────────────────────────────────────────────
@@ -910,6 +1022,21 @@ def apply_node(state: DesignState) -> dict:
 
         r = win32com.client.GetActiveObject("Rhapsody2.Application")
         print(f"[Apply] Connected to Rhapsody: {r.activeProject().name}", file=sys.stderr)
+
+        # ── Approved Analysis AD (HITL #1) → write back to Rhapsody ──────────
+        updated_ad = state.get("updated_ad", "")
+        if updated_ad and updated_ad.strip():
+            try:
+                from create_activity_diagram import create_or_update_ad
+                ad_res = create_or_update_ad(state["component_name"], state["current_usecase"],
+                                             updated_ad, r,
+                                             req_map=state.get("existing_req_map", {}))
+                print(f"[Apply] Analysis AD update: {ad_res}", file=sys.stderr)
+                if ad_res.get("errors"):
+                    errors.extend(ad_res["errors"])
+            except Exception as e:
+                print(f"[Apply] Analysis AD error: {e}", file=sys.stderr)
+                errors.append(f"analysis_ad: {e}")
 
         # ── New operations → add to existing module class ─────────────────────
         new_ops = state.get("new_operations", [])
@@ -964,41 +1091,10 @@ def apply_node(state: DesignState) -> dict:
         print(tb, file=sys.stderr)
         errors.append(f"apply_node: {e}\n{tb}")
 
-    # ── Operation ADs ────────────────────────────────────────────────────────
-    op_ads = []
-    new_ops = state.get("new_operations", [])
-    if new_ops:
-        try:
-            from create_operation_ad import create_operation_ad
-            from llm_node import llm_call
-            import json as _j
-            for op in new_ops:
-                try:
-                    prompt = OP_AD_PROMPT.format(
-                        op_name    = op.get("name",""),
-                        arguments  = _j.dumps(op.get("arguments",[]), indent=2),
-                        return_type= op.get("return_type","void"),
-                        rationale  = op.get("rationale",""),
-                        req_ids    = ", ".join(op.get("req_ids",[])),
-                        updated_ad = state.get("updated_ad",""),
-                    )
-                    print(f"[Apply] Generating AD for: {op.get('name')}", file=sys.stderr)
-                    mermaid = "flowchart TD\n" + llm_call(prompt)
-                    if "```" in mermaid:
-                        mermaid = "\n".join(l for l in mermaid.split("\n")
-                                            if not l.strip().startswith("```"))
-                    result = create_operation_ad(state["component_name"], op["name"], mermaid, r)
-                    op_ads.append({"operation": op["name"], "result": result})
-                    print(f"[Apply] Op AD: {op['name']} → {result.get('success')}", file=sys.stderr)
-                except Exception as e:
-                    print(f"[Apply] Op AD error {op.get('name')}: {e}", file=sys.stderr)
-                    op_ads.append({"operation": op.get("name",""), "error": str(e)})
-        except Exception as e:
-            print(f"[Apply] Op AD generation failed: {e}", file=sys.stderr)
-            errors.append(f"op_ad: {e}")
-
+    # Operation ADs are generated by fan_out_ad_node (runs right after this
+    # node) — not here, otherwise every operation AD would be created twice.
     print(f"[Apply] Done. Errors: {len(errors)}", file=sys.stderr)
-    return {"applied": True, "errors": errors, "operation_ads": op_ads}
+    return {"applied_usecases": [state["current_usecase"]], "errors": errors}
 
 
 # ── Fan-out: Operation ADs ────────────────────────────────────────────────────
@@ -1014,36 +1110,43 @@ def fan_out_ad_node(state: DesignState):
         return {}
 
     print(f"[FanOut] {len(ops)} operation ADs to generate")
+    edited  = state.get("op_ads") or {}
+    results = []
     # Generate ADs sequentially (no true fan-out in this version)
     for op in ops:
+        op_name = op.get("name", "")
         try:
             import win32com.client
             from create_operation_ad import create_operation_ad
-            from mermaid_to_ad import from_mermaid
-            from llm_node import llm_call
 
-            op_name = op.get("name", "")
-            prompt = OP_AD_PROMPT.format(
-                op_name    = op_name,
-                arguments  = __import__("json").dumps(op.get("arguments", []), indent=2),
-                return_type= op.get("return_type", "void"),
-                rationale  = op.get("rationale", ""),
-                req_ids    = ", ".join(op.get("req_ids", [])),
-                updated_ad = state.get("updated_ad", ""),
-            )
-            print(f"[FanOut] Generating AD for: {op_name}")
-            mermaid = "flowchart TD\n" + llm_call(prompt)
+            if (edited.get(op_name) or "").strip():
+                print(f"[FanOut] Using reviewer-edited AD for: {op_name}")
+                mermaid = edited[op_name]
+            else:
+                prompt = OP_AD_PROMPT.format(
+                    op_name    = op_name,
+                    arguments  = json.dumps(op.get("arguments", []), indent=2),
+                    return_type= op.get("return_type", "void"),
+                    rationale  = op.get("rationale", ""),
+                    req_ids    = ", ".join(op.get("req_ids", [])),
+                    updated_ad = state.get("updated_ad", ""),
+                )
+                print(f"[FanOut] Generating AD for: {op_name}")
+                mermaid = _with_flowchart_header(llm_call(prompt))
             if "```" in mermaid:
                 mermaid = "\n".join(l for l in mermaid.split("\n")
                                     if not l.strip().startswith("```"))
+            mermaid = _sanitize_mermaid(mermaid)
 
             r = win32com.client.GetActiveObject("Rhapsody2.Application")
             result = create_operation_ad(state["component_name"], op_name, mermaid, r)
             print(f"[FanOut] {op_name}: {result.get('success')}")
+            results.append({"operation": op_name, "result": result})
         except Exception as e:
-            print(f"[FanOut] ERROR {op.get('name')}: {e}")
+            print(f"[FanOut] ERROR {op_name}: {e}")
+            results.append({"operation": op_name, "error": str(e)})
 
-    return {}
+    return {"operation_ads": results, "op_ads": {}}
 
 
 # ── Phase 4: Operation AD ─────────────────────────────────────────────────────
@@ -1061,6 +1164,13 @@ def op_ad_prompt_node(state: OpADState) -> dict:
             updated_ad = state.get("updated_ad", ""),
         ),
     }
+
+
+def _with_flowchart_header(text: str) -> str:
+    """Prepend 'flowchart TD' unless the LLM already returned a full diagram."""
+    body = "\n".join(l for l in (text or "").strip().splitlines()
+                     if not l.strip().startswith("```")).strip()
+    return body if body.startswith(("flowchart", "graph")) else "flowchart TD\n" + body
 
 
 def _sanitize_mermaid(text: str) -> str:
@@ -1154,9 +1264,6 @@ def route_after_ingest(state: DesignState) -> str:
     if not state.get("requirements"):
         return END
     return "classify_prompt_node"
-    if state.get("approved"):
-        return "apply_node"
-    return "design_elements_prompt_node"   # re-run with feedback
 
 
 def route_after_review(state: DesignState) -> str:
@@ -1284,18 +1391,174 @@ def build_graph():
         END               : END,
     })
 
-    from langgraph.checkpoint.memory import MemorySaver
-    memory = MemorySaver()
-    return g.compile(
-        checkpointer = memory,
-    )
+    return g.compile(checkpointer=_make_checkpointer())
+
+
+# ── Checkpointer ──────────────────────────────────────────────────────────────
+# Each run / resume is a SEPARATE Python process (spawned by the VS Code
+# extension), so the checkpoint MUST be persisted to disk — an in-memory saver
+# loses the paused graph as soon as the process exits and resume finds nothing.
+
+CHECKPOINT_DB = os.path.join(RUNTIME_DIR, "design_checkpoints.db")
+
+
+def _make_checkpointer():
+    try:
+        import sqlite3
+        from langgraph.checkpoint.sqlite import SqliteSaver   # pip: langgraph-checkpoint-sqlite
+        conn = sqlite3.connect(CHECKPOINT_DB, check_same_thread=False)
+        return SqliteSaver(conn)
+    except ImportError:
+        print("[Checkpoint] langgraph-checkpoint-sqlite not installed — using file-backed "
+              "fallback. Run: pip install langgraph-checkpoint-sqlite", file=sys.stderr)
+        return _FileBackedSaver(CHECKPOINT_DB + ".pkl")
+
+
+try:
+    from langgraph.checkpoint.memory import InMemorySaver as _MemSaverBase
+except ImportError:   # older langgraph
+    from langgraph.checkpoint.memory import MemorySaver as _MemSaverBase
+
+
+class _FileBackedSaver(_MemSaverBase):
+    """In-memory saver that is loaded from / flushed to a pickle file after every write."""
+
+    def __init__(self, path: str):
+        import threading
+        super().__init__()
+        self._path = path
+        self._lock = threading.RLock()   # langgraph may write from worker threads
+        self._load()
+
+    def _load(self):
+        import pickle
+        if not os.path.exists(self._path):
+            return
+        try:
+            with open(self._path, "rb") as f:
+                data = pickle.load(f)
+            for thread, ns_map in data.get("storage", {}).items():
+                for ns, ckpts in ns_map.items():
+                    self.storage[thread][ns].update(ckpts)
+            for k, v in data.get("writes", {}).items():
+                self.writes[k].update(v)
+            self.blobs.update(data.get("blobs", {}))
+        except Exception as e:
+            print(f"[Checkpoint] Could not load {self._path}: {e}", file=sys.stderr)
+
+    def _flush(self):
+        import pickle
+        data = {
+            "storage": {t: {ns: dict(c) for ns, c in m.items()} for t, m in self.storage.items()},
+            "writes" : {k: dict(v) for k, v in self.writes.items()},
+            "blobs"  : dict(self.blobs),
+        }
+        tmp = self._path + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump(data, f)
+        os.replace(tmp, self._path)
+
+    def put(self, *a, **kw):
+        with self._lock:
+            r = super().put(*a, **kw); self._flush(); return r
+
+    def put_writes(self, *a, **kw):
+        with self._lock:
+            r = super().put_writes(*a, **kw); self._flush(); return r
+
+    def delete_thread(self, *a, **kw):
+        with self._lock:
+            r = super().delete_thread(*a, **kw); self._flush(); return r
 
 
 graph = build_graph()
 
 
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def _requirements_considered(state_vals: dict) -> list:
+    current_reqs = state_vals.get("current_reqs") or []
+    req_groups   = state_vals.get("req_groups") or {}
+    out = []
+    for r in current_reqs:
+        uc = "—"
+        for uc_name, uc_reqs in req_groups.items():
+            if isinstance(uc_reqs, list) and any(
+                (rr.get("id") if isinstance(rr, dict) else rr) == r.get("id")
+                for rr in uc_reqs
+            ):
+                uc = uc_name
+                break
+        out.append({"id": r.get("id", ""), "text": r.get("text", "")[:100], "usecase": uc})
+    return out
+
+
+def _run_graph(graph_input, config, write_output, component: str, label: str) -> None:
+    """Stream the graph until it pauses (interrupt) or finishes, then write output.
+    Used for BOTH the initial run and every resume, so a resume that reaches the
+    next human-review gate is reported as 'interrupted', not as 'completed'."""
+    errors, new_ops, op_ads, approved, applied = [], [], [], None, []
+
+    # Consume the WHOLE stream (never return/exit from inside it): the final
+    # checkpoint is only guaranteed to be saved once the stream has finished,
+    # and resume needs it. durability="sync" saves each step before moving on.
+    interrupt_data = None
+    try:
+        stream = graph.stream(graph_input, config, stream_mode="updates", durability="sync")
+    except TypeError:   # older langgraph without the durability option
+        stream = graph.stream(graph_input, config, stream_mode="updates")
+
+    for chunk in stream:
+        for node_name, node_data in chunk.items():
+            print(f"[{label}] Node: {node_name}", file=sys.stderr)
+
+            if node_name == "__interrupt__":
+                iv = node_data[0] if isinstance(node_data, (list, tuple)) and node_data else None
+                interrupt_data = getattr(iv, "value", None) or {}
+                continue
+
+            if isinstance(node_data, dict):
+                errors  += node_data.get("errors", []) or []
+                op_ads  += node_data.get("operation_ads", []) or []
+                if node_data.get("new_operations"):
+                    new_ops = node_data["new_operations"]
+                if "approved" in node_data:
+                    approved = node_data["approved"]
+                applied += node_data.get("applied_usecases", []) or []
+
+    if interrupt_data is not None:
+        try:
+            gstate = graph.get_state(config)
+            state_vals = gstate.values if gstate else {}
+        except Exception:
+            state_vals = {}
+        write_output(
+            "interrupted",
+            phase                   = interrupt_data.get("phase", "human_review"),
+            interrupt_message       = interrupt_data.get("message", "Review required"),
+            requirements_considered = _requirements_considered(state_vals),
+            errors_so_far           = errors,
+            applied_usecases        = applied,
+            data                    = {k: v for k, v in interrupt_data.items()
+                                       if k != "message"},
+        )
+        return
+
+    write_output(
+        "completed",
+        success        = len(errors) == 0,
+        summary        = (f"Design applied for {component} (use cases: {', '.join(applied)})" if applied
+                          else f"Design run finished for {component} (nothing applied)"),
+        applied_usecases = applied,
+        errors         = errors,
+        approved       = approved,
+        new_operations = new_ops,
+        operation_ads  = op_ads,
+    )
+
+
 if __name__ == "__main__":
-    import argparse, json, sys
+    import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--component", required=True)
@@ -1305,7 +1568,9 @@ if __name__ == "__main__":
                         help="Path to Excel requirements file (used when --source=excel)")
     parser.add_argument("--output",    required=True)
     parser.add_argument("--resume",    default=None,
-                        help="JSON resume value for interrupted graph")
+                        help="Resume value (plain text or JSON) for an interrupted graph")
+    parser.add_argument("--resume-file", default=None,
+                        help="Path to a JSON file holding the resume value (for large edits)")
     args = parser.parse_args()
 
     config = {"configurable": {"thread_id": args.component}}
@@ -1315,115 +1580,42 @@ if __name__ == "__main__":
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump({"status": status, **kwargs}, f, indent=2)
 
-    initial_state = {
-        "component_name"    : args.component,
-        "requirement_source": args.source,
-        "excel_path"        : args.excel or "",
-    }
-
     try:
-        if args.resume:
-            resume_val = json.loads(args.resume) if args.resume.startswith("{") else args.resume
-            print(f"[Resume] Resuming with: {resume_val!r}", file=sys.stderr)
+        resume_val = None
+        if args.resume_file:
+            with open(args.resume_file, encoding="utf-8") as f:
+                resume_val = json.load(f)
+        elif args.resume is not None:
+            txt = args.resume.strip()
+            try:
+                resume_val = json.loads(txt) if txt.startswith("{") else txt
+            except json.JSONDecodeError:
+                resume_val = txt
 
-            # Try streaming first to see if graph has pending interrupt
-            nodes_run = []
-            result = None
-            for chunk in graph.stream(Command(resume=resume_val), config, stream_mode="updates"):
-                for node_name, node_data in chunk.items():
-                    print(f"[Resume] Node: {node_name}", file=sys.stderr)
-                    nodes_run.append(node_name)
-                    # Only update result if node returned meaningful data
-                    if isinstance(node_data, dict) and node_data:
-                        result = {**(result or {}), **node_data}
-
-            if not nodes_run:
-                # Checkpoint already consumed — read state and apply directly
-                print("[Resume] No nodes ran — applying from saved state", file=sys.stderr)
-                state = graph.get_state(config)
-                if state and state.values:
-                    vals = state.values
-                    approved_val = resume_val.strip().lower() in ("apply","approve","yes","ok") \
-                                   if isinstance(resume_val, str) else False
-                    if approved_val:
-                        # Run apply logic directly
-                        from apply_design import apply_design_state
-                        result = apply_design_state(vals, args.component)
-                    else:
-                        result = {"errors": [], "approved": False}
-
-            errors  = (result or {}).get("errors", [])
-            approved = (result or {}).get("approved", False)
-            new_ops  = (result or {}).get("new_operations", [])
-            op_ads   = (result or {}).get("operation_ads", [])
-            print(f"[Resume] approved={approved} new_ops={len(new_ops)} op_ads={len(op_ads)}", file=sys.stderr)
-            write_output("completed", success=len(errors)==0,
-                        summary=f"Design applied for {args.component}",
-                        errors=errors, approved=approved,
-                        new_operations=new_ops, operation_ads=op_ads)
+        if resume_val is not None:
+            print(f"[Resume] Resuming with: {str(resume_val)[:200]!r}", file=sys.stderr)
+            snapshot = graph.get_state(config)
+            if not snapshot or not snapshot.next:
+                write_output(
+                    "error",
+                    error=(f"No paused design run found for {args.component}. "
+                           f"Start a new run with /design {args.component}."),
+                )
+                sys.exit(0)
+            _run_graph(Command(resume=resume_val), config, write_output,
+                       args.component, "Resume")
         else:
-            result = None
-            for chunk in graph.stream(initial_state, config, stream_mode="updates"):
-                # chunk is {node_name: node_output_dict}
-                for node_name, node_data in chunk.items():
-                    print(f"[Graph] Node: {node_name}", file=sys.stderr)
-
-                    # Check for interrupt
-                    if node_name == "__interrupt__":
-                        interrupts = node_data
-                        if isinstance(interrupts, (list, tuple)) and len(interrupts) > 0:
-                            iv = interrupts[0]
-                            interrupt_data = iv.value if hasattr(iv, 'value') else {}
-                        else:
-                            interrupt_data = {}
-                        # Get current state for requirements info
-                        try:
-                            gstate = graph.get_state(config)
-                            state_vals = gstate.values if gstate else {}
-                        except:
-                            state_vals = {}
-                        current_reqs = state_vals.get("current_reqs") or []
-                        req_groups   = state_vals.get("req_groups") or {}
-                        reqs_considered = []
-                        for r in current_reqs:
-                            uc = "—"
-                            for uc_name, uc_reqs in req_groups.items():
-                                if isinstance(uc_reqs, list) and any(
-                                    (rr.get("id") if isinstance(rr,dict) else rr) == r.get("id")
-                                    for rr in uc_reqs
-                                ):
-                                    uc = uc_name
-                                    break
-                            reqs_considered.append({
-                                "id"    : r.get("id",""),
-                                "text"  : r.get("text","")[:100],
-                                "usecase": uc,
-                            })
-                        write_output(
-                            "interrupted",
-                            phase            = interrupt_data.get("phase", "human_review"),
-                            interrupt_message= interrupt_data.get("message", "Review required"),
-                            requirements_considered = reqs_considered,
-                            data             = {
-                                k: v for k, v in interrupt_data.items()
-                                if k != "message"
-                            },
-                        )
-                        sys.exit(0)
-
-                    if isinstance(node_data, dict):
-                        result = node_data
-
-            # Completed
-            errors = result.get("errors", []) if result else []
-            write_output(
-                "completed",
-                success        = len(errors) == 0,
-                summary        = f"Design complete for {args.component}",
-                errors         = errors,
-                new_operations = result.get("new_operations", []) if result else [],
-                operation_ads  = result.get("operation_ads", []) if result else [],
-            )
+            # Fresh run — drop any stale paused run for this component
+            try:
+                graph.checkpointer.delete_thread(args.component)
+            except Exception as e:
+                print(f"[Graph] Could not clear old checkpoint: {e}", file=sys.stderr)
+            initial_state = {
+                "component_name"    : args.component,
+                "requirement_source": args.source,
+                "excel_path"        : args.excel or "",
+            }
+            _run_graph(initial_state, config, write_output, args.component, "Graph")
 
     except Exception as e:
         import traceback

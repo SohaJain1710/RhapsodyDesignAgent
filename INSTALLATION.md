@@ -90,6 +90,7 @@ python --version   # Should be 3.11+
 # Core dependencies
 pip install pywin32              # Rhapsody COM automation
 pip install langgraph            # LangGraph pipeline framework
+pip install langgraph-checkpoint-sqlite  # Persists paused runs so review/resume works
 pip install langchain            # LangChain base
 pip install langchain-openai     # OpenAI-compatible LLM client
 pip install openpyxl             # Excel reading
@@ -103,7 +104,8 @@ python .venv\Scripts\pywin32_postinstall.py -install
 
 ```
 pywin32>=306
-langgraph>=0.2.0
+langgraph>=1.1.0
+langgraph-checkpoint-sqlite>=2.0.0
 langchain>=0.3.0
 langchain-openai>=0.2.0
 openpyxl>=3.1.0

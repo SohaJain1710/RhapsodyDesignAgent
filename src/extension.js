@@ -149,6 +149,40 @@ function outputFileFor(component, requirementIds) {
     return path.join(RUNTIME_DIR, `_design_output_${component}_${key}.json`);
 }
 
+function renderRequirementsTable(stream, output) {
+    const reqs = output.requirements_considered || [];
+    if (!reqs.length) return;
+    stream.markdown(`\n### 📋 Requirements Considered (${reqs.length})\n`);
+    let tbl = '\n| Requirement | Use Case | Description |\n|---|---|---|\n';
+    reqs.forEach(r => {
+        const cleanText = (r.text||'').replace(/[\r\n|]+/g,' ').substring(0,80);
+        tbl += '| `' + r.id + '` | ' + (r.usecase||'—') + ' | ' + cleanText + ' |\n';
+    });
+    stream.markdown(tbl + '\n');
+}
+
+// Edits/feedback submitted from a review webview, picked up by /design_resume --from-review
+function reviewEditsFile(component) {
+    return path.join(RUNTIME_DIR, `_review_edits_${component}.json`);
+}
+
+function resumeFromWebview(component, resumeValue) {
+    fs.writeFileSync(reviewEditsFile(component), JSON.stringify(resumeValue), 'utf8');
+    return vscode.commands.executeCommand('workbench.action.chat.open', {
+        query: '@rhapsody /design_resume ' + component + ' --from-review',
+    });
+}
+
+// ── HTML/script escaping for webviews ────────────────────────────────────
+function escHtml(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g,
+        c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+// JSON that is safe to embed inside an inline <script> (no "</script>" breakout)
+function jsonForScript(v) {
+    return JSON.stringify(v).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+}
+
 // ── Run (or resume) the unified graph, relaying interrupts as chat ───────
 async function runUnifiedGraph(component, requirementIds, requirementTexts, resumeValue, stream, token) {
     const outputFile = outputFileFor(component, requirementIds);
@@ -160,18 +194,17 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
     }
 
     if (resumeValue !== undefined) {
-        args.push('--resume', typeof resumeValue === 'string' ? resumeValue : JSON.stringify(resumeValue));
+        // Pass the resume value through a file: edited diagrams can be large and
+        // multi-line, which does not survive the Windows command line reliably.
+        const resumeFile = path.join(RUNTIME_DIR, `_resume_${component}.json`);
+        fs.writeFileSync(resumeFile, JSON.stringify(resumeValue), 'utf8');
+        args.push('--resume-file', resumeFile);
     }
+    // A fresh run clears the old checkpoint for this component inside Python
+    // (design_checkpoints.db is shared by all components, so it is not deleted here).
 
-    // Delete old checkpoint for fresh run (not resume)
-    if (resumeValue === undefined) {
-        const ckptFile = path.join(RUNTIME_DIR, 'design_checkpoints.db');
-        try { fs.unlinkSync(ckptFile); } catch {}
-    }
-
-    if (resumeValue === undefined) {
-        try { fs.unlinkSync(path.join(RUNTIME_DIR, 'design_checkpoints.db')); } catch {}
-    }
+    // Never show a stale result from a previous run if Python dies early
+    try { fs.unlinkSync(outputFile); } catch {}
 
     stream.progress('Running design graph...');
 
@@ -207,30 +240,40 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
         const comp = data.component || component;
         pendingSession = { stream, token, component: comp };
 
-        // ── AD-only review checkpoint (after update_ad_parse, before design elements) ──
+        // Report what this run already wrote to Rhapsody before pausing again
+        if (output.applied_usecases && output.applied_usecases.length) {
+            stream.markdown(`\n✅ **Applied to Rhapsody:** ${output.applied_usecases.join(', ')}`);
+        }
+        if (output.errors_so_far && output.errors_so_far.length) {
+            stream.markdown(`\n**Errors so far:**\n${output.errors_so_far.map(e => `- ${String(e).split('\n')[0]}`).join('\n')}`);
+        }
+
+        // ── HITL #1: Analysis AD review (after update_ad_parse, before design elements) ──
         if (data.phase === 'ad_review') {
             stream.markdown(`\n---\n## 🔄 Analysis AD Review — ${data.usecase || comp}`);
             stream.markdown('\nThe Analysis Activity Diagram has been updated based on the requirements. Please review it before the pipeline designs operations, interfaces, and IBD.\n');
+            renderRequirementsTable(stream, output);
             if (data.updated_ad && data.updated_ad.trim()) {
-                stream.markdown('### Updated Analysis Activity Diagram\n```mermaid\n' + data.updated_ad + '\n```');
+                stream.markdown('\n### Updated Analysis Activity Diagram\n```mermaid\n' + data.updated_ad + '\n```');
             }
-            stream.markdown('\n---\n**Approve the AD to continue, or type a correction and reply `apply <component> <corrected mermaid>`.**');
-            stream.button({ command: 'rhapsody.design.apply', title: '✅ Approve AD & Continue', arguments: [comp] });
+            const reqMap = data.req_map || {};
+            if (Object.keys(reqMap).length) {
+                let t = '\n**Requirement links per action**\n\n| Action | Requirements |\n|---|---|\n';
+                Object.entries(reqMap).forEach(([a, r]) => { t += '| `' + a + '` | ' + (r || []).join(', ') + ' |\n'; });
+                stream.markdown(t);
+            }
+            stream.markdown(
+                '\n---\n**Choose an action:** approve the AD, or open the editor to correct it or ask the LLM to regenerate it with your feedback.' +
+                '\n\nYou can also reply `@rhapsody /design_resume ' + comp + ' <your feedback>` to regenerate, ' +
+                'or paste a corrected Mermaid `flowchart` after the component name to use it as-is.');
+            stream.button({ command: 'rhapsody.design.apply',    title: '✅ Approve AD & Continue', arguments: [comp] });
+            stream.button({ command: 'rhapsody.design.reviewAd', title: '✏️ Edit AD / Give Feedback', arguments: [comp, outputFile] });
             return;
         }
 
+        // ── HITL #2: full design review ──
         stream.markdown(`\n---\n## ⏸️ Design Review — ${data.usecase || comp}`);
-
-        // Requirements considered
-        if (output.requirements_considered && output.requirements_considered.length) {
-            stream.markdown(`\n### 📋 Requirements Considered (${output.requirements_considered.length})\n`);
-            let tbl = '\n| Requirement | Use Case | Description |\n|---|---|---|\n';
-            output.requirements_considered.forEach(r => {
-                const cleanText = (r.text||'').replace(/[\r\n]+/g,' ').substring(0,80);
-                tbl += '| `' + r.id + '` | ' + (r.usecase||'—') + ' | ' + cleanText + ' |\n';
-            });
-            stream.markdown(tbl + '\n');
-        }
+        renderRequirementsTable(stream, output);
 
         // Updated AD
         if (data.updated_ad && data.updated_ad.trim()) {
@@ -418,68 +461,171 @@ function openReviewWebview(context, data, comp, outputFile, stream, token) {
         { enableScripts: true, retainContextWhenHidden: true }
     );
 
-    const safeData = JSON.stringify({
+    const safeData = jsonForScript({
         component       : comp,
         usecase         : data.usecase || '',
         updated_ad      : data.updated_ad || '',
+        static_view     : data.static_view || '',
         req_map         : data.req_map || {},
         new_operations  : data.new_operations || [],
         new_interfaces  : data.new_interfaces || [],
+        realizations    : data.realizations || [],
         ibd_delta       : data.ibd_delta || { ports: [], links: [] },
     });
 
     panel.webview.html = getReviewWebviewHtml(safeData, comp);
 
+    // Apply / feedback RESUME the paused graph (HITL #2) so that the approved
+    // design is applied by the graph and the remaining use cases continue.
     panel.webview.onDidReceiveMessage(async msg => {
         if (msg.command === 'apply') {
             panel.dispose();
-            const editFile  = path.join(RUNTIME_DIR, `_edit_${comp}.json`);
-            const resultFile = path.join(RUNTIME_DIR, `_apply_result_${comp}.json`);
-            fs.writeFileSync(editFile, JSON.stringify(msg.data), 'utf8');
-
-            vscode.window.withProgress({
-                location: vscode.ProgressLocation.Notification,
-                title: 'Applying design to Rhapsody...',
-                cancellable: false,
-            }, async () => {
-                // Start LM proxy relay using a fresh token
-                const cts = new vscode.CancellationTokenSource();
-                const stopRelay = await runLlmRelay(cts.token);
-                try {
-                    const applyScript = path.join(ROOT_DIR, 'tools', 'apply_design.py');
-                    await runPython(applyScript, [
-                        '--component', comp,
-                        '--edit',      editFile,
-                        '--output',    resultFile,
-                    ]);
-                    const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
-                    if (result.success) {
-                        vscode.window.showInformationMessage(`✅ Design applied to Rhapsody successfully.`);
-                    } else {
-                        vscode.window.showWarningMessage(`⚠️ Applied with errors: ${(result.errors||[]).join(', ')}`);
-                    }
-                } catch(e) {
-                    vscode.window.showErrorMessage(`❌ Apply failed: ${e.message}`);
-                    outputChannel && outputChannel.appendLine(`[apply] ERROR: ${e.message}`);
-                } finally {
-                    stopRelay();
-                    cts.dispose();
-                }
-            });
+            await resumeFromWebview(comp, { approved: true, edits: msg.data });
+        } else if (msg.command === 'feedback') {
+            panel.dispose();
+            await resumeFromWebview(comp, { approved: false, feedback: msg.feedback || '' });
         } else if (msg.command === 'cancel') {
             panel.dispose();
         }
     }, undefined, context ? context.subscriptions : []);
 }
 
-function getReviewWebviewHtml(safeData, comp) {
+// ── Analysis AD Review Webview (HITL #1) ─────────────────────────────────────
+function openAdReviewWebview(context, data, comp, requirements) {
+    const panel = vscode.window.createWebviewPanel(
+        'rhapsodyAdReview',
+        `AD Review — ${data.usecase || comp}`,
+        vscode.ViewColumn.One,
+        { enableScripts: true, retainContextWhenHidden: true }
+    );
+    const safeData = jsonForScript({
+        component    : comp,
+        usecase      : data.usecase || '',
+        updated_ad   : data.updated_ad || '',
+        req_map      : data.req_map || {},
+        requirements : requirements || [],
+    });
+    panel.webview.html = getAdReviewWebviewHtml(safeData, comp);
+
+    panel.webview.onDidReceiveMessage(async msg => {
+        if (msg.command === 'approve') {
+            panel.dispose();
+            await resumeFromWebview(comp, msg.edited
+                ? { approved: true, updated_ad: msg.updated_ad, req_map: msg.req_map }
+                : { approved: true });
+        } else if (msg.command === 'feedback') {
+            panel.dispose();
+            await resumeFromWebview(comp, { approved: false, feedback: msg.feedback || '' });
+        } else if (msg.command === 'cancel') {
+            panel.dispose();
+        }
+    }, undefined, context ? context.subscriptions : []);
+}
+
+function getAdReviewWebviewHtml(safeData, comp) {
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Design Review</title>
+<title>Analysis AD Review</title>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-<style>
+<style>${REVIEW_CSS}</style>
+</head>
+<body>
+<script>mermaid.initialize({ startOnLoad: false, theme: 'dark' });</script>
+<h1>🔄 Analysis AD Review — ${escHtml(comp)}</h1>
+<div id="app"></div>
+<script>
+const vscodeApi = acquireVsCodeApi();
+const RAW = ${safeData};
+
+function esc(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g,
+        c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function el(tag, cls, html) {
+    const e = document.createElement(tag);
+    if (cls)  e.className = cls;
+    if (html) e.innerHTML = html;
+    return e;
+}
+async function renderMermaid(id, code) {
+    const target = document.getElementById(id);
+    if (!target || !code || !code.trim()) return;
+    try {
+        const { svg } = await mermaid.render('m' + id + Date.now(), code);
+        target.innerHTML = svg;
+    } catch(e) {
+        target.innerHTML = '<span style="color:#f87171;font-size:11px">⚠ ' + esc(e.message) + '</span>';
+    }
+}
+
+const app = document.getElementById('app');
+app.appendChild(el('div', 'hint', 'Use case: <code>' + esc(RAW.usecase) + '</code>'));
+
+if (RAW.requirements.length) {
+    const rDiv = el('div', 'section');
+    rDiv.appendChild(el('h2', '', '📋 Requirements Considered (' + RAW.requirements.length + ')'));
+    RAW.requirements.forEach(r => {
+        rDiv.appendChild(el('div', 'item', '<div class="details"><div class="title"><code>' + esc(r.id) + '</code></div><div class="meta">' + esc(r.text) + '</div></div>'));
+    });
+    app.appendChild(rDiv);
+}
+
+const edDiv = el('div', 'section');
+edDiv.appendChild(el('h2', '', '📊 Analysis Activity Diagram'));
+const med = el('div', 'med');
+med.appendChild(el('label', '', 'Edit the Mermaid flowchart (live preview below)'));
+const ta = document.createElement('textarea'); ta.value = RAW.updated_ad; ta.style.height = '260px';
+let timer = null;
+ta.oninput = () => { clearTimeout(timer); timer = setTimeout(() => renderMermaid('ad-preview', ta.value), 600); };
+med.appendChild(ta);
+const resetBtn = el('button', 'btn-ref', '↺ Reset to proposal');
+resetBtn.onclick = () => { ta.value = RAW.updated_ad; renderMermaid('ad-preview', ta.value); };
+const row = el('div', 'ed-actions'); row.appendChild(resetBtn); med.appendChild(row);
+const prev = el('div', 'preview'); prev.id = 'ad-preview'; med.appendChild(prev);
+edDiv.appendChild(med);
+
+const reqMap = RAW.req_map || {};
+if (Object.keys(reqMap).length) {
+    edDiv.appendChild(el('h2', '', '🔗 Requirement links per action'));
+    Object.entries(reqMap).forEach(([a, r]) => {
+        edDiv.appendChild(el('div', 'meta', '<code>' + esc(a) + '</code> → ' + esc((r || []).join(', '))));
+    });
+}
+app.appendChild(edDiv);
+
+const fbDiv = el('div', 'section');
+fbDiv.appendChild(el('h2', '', '💬 Feedback for the LLM (optional)'));
+const fbTa = document.createElement('textarea'); fbTa.className = 'fb';
+fbTa.placeholder = 'Describe what is wrong. "Regenerate with Feedback" asks the LLM to redo the AD using this feedback.';
+fbDiv.appendChild(fbTa);
+app.appendChild(fbDiv);
+
+const btnRow = el('div', 'btn-row');
+const cancelBtn = el('button', 'btn-cancel', '✗ Cancel');
+cancelBtn.onclick = () => vscodeApi.postMessage({ command: 'cancel' });
+const regenBtn = el('button', 'btn-regen', '🔁 Regenerate with Feedback');
+regenBtn.onclick = () => {
+    const fb = fbTa.value.trim();
+    if (!fb) { fbTa.focus(); fbTa.placeholder = 'Enter feedback first, then click Regenerate.'; return; }
+    vscodeApi.postMessage({ command: 'feedback', feedback: fb });
+};
+const approveBtn = el('button', 'btn-apply', '✅ Approve AD & Continue');
+approveBtn.onclick = () => {
+    const edited = ta.value.trim() !== (RAW.updated_ad || '').trim();
+    vscodeApi.postMessage({ command: 'approve', edited, updated_ad: ta.value, req_map: RAW.req_map || {} });
+};
+btnRow.appendChild(cancelBtn); btnRow.appendChild(regenBtn); btnRow.appendChild(approveBtn);
+app.appendChild(btnRow);
+
+setTimeout(() => renderMermaid('ad-preview', ta.value), 100);
+</script>
+</body>
+</html>`;
+}
+
+const REVIEW_CSS = `
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: var(--vscode-font-family, sans-serif); font-size: 13px;
        background: var(--vscode-editor-background, #1e1e1e);
@@ -523,22 +669,38 @@ button { padding: 8px 18px; border: none; border-radius: 4px; cursor: pointer; f
 .badge-new  { background: #14532d; color: #86efac; border-radius: 3px; padding: 1px 5px; font-size: 10px; margin-left: 5px; }
 code { background: #264f78; color: #9cdcfe; border-radius: 3px; padding: 1px 4px; font-size: 12px; }
 .op-select { margin-bottom: 8px; }
+.hint { font-size: 11px; color: #888; }
+.ed-actions { display: flex; gap: 8px; align-items: center; }
+textarea.fb { width: 100%; height: 70px; resize: vertical; background: #1e1e1e; color: #d4d4d4;
+  border: 1px solid #555; border-radius: 3px; padding: 8px; font-size: 12px; }
+.btn-regen { background: #8a5a00; color: #fff; }
 .op-select label { font-size: 12px; color: #888; }
 .op-select select { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555; border-radius: 3px; padding: 4px 8px; font-size: 12px; }
-</style>
+`;
+
+function getReviewWebviewHtml(safeData, comp) {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Design Review</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>${REVIEW_CSS}</style>
 </head>
 <body>
 <script>mermaid.initialize({ startOnLoad: false, theme: 'dark' });</script>
-<h1>⏸️ Design Review — ${comp}</h1>
+<h1>⏸️ Design Review — ${escHtml(comp)}</h1>
 <div id="app"></div>
 <script>
 const vscodeApi = acquireVsCodeApi();
 const RAW  = ${safeData};
-const comp = '${comp}';
+const comp = ${jsonForScript(comp)};
 
 let S = {
     updated_ad     : RAW.updated_ad || '',
     static_view    : RAW.static_view || '',
+    static_view_edited: false,
+    active_tab     : 'static',
     op_ads         : {},
     new_operations : RAW.new_operations.map(o => ({ ...o, _sel: true })),
     new_interfaces : RAW.new_interfaces.map(i => ({ ...i, _sel: true })),
@@ -548,6 +710,10 @@ let S = {
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+function esc(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g,
+        c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
 function el(tag, cls, html) {
     const e = document.createElement(tag);
     if (cls)  e.className = cls;
@@ -587,10 +753,10 @@ function render() {
         cb.onchange = () => { S.new_operations[i]._sel = cb.checked; };
         item.appendChild(cb);
         const det = el('div', 'details');
-        det.appendChild(el('div', 'title', '<code>' + op.name + '</code><span class="badge-new">NEW</span>'));
-        det.appendChild(el('div', 'meta', 'Returns: <code>' + (op.return_type||'void') + '</code> | ' + (op.visibility||'private') + ' | ' + (op.req_ids||[]).join(', ')));
+        det.appendChild(el('div', 'title', '<code>' + esc(op.name) + '</code><span class="badge-new">NEW</span>'));
+        det.appendChild(el('div', 'meta', 'Returns: <code>' + esc(op.return_type||'void') + '</code> | ' + esc(op.visibility||'private') + ' | ' + esc((op.req_ids||[]).join(', '))));
         const fields = el('div', 'fields');
-        fields.appendChild(field('Name',        inp(op.name,            v => S.new_operations[i].name = v, '160px')));
+        fields.appendChild(field('Name',        inp(op.name,            v => renameOp(i, v), '160px')));
         fields.appendChild(field('Return Type', inp(op.return_type||'void', v => S.new_operations[i].return_type = v, '100px')));
         fields.appendChild(field('Visibility',  selEl(['private','public','protected'], op.visibility||'private', v => S.new_operations[i].visibility = v)));
         det.appendChild(fields);
@@ -620,8 +786,8 @@ function render() {
             cb.onchange = () => { S.new_interfaces[i]._sel = cb.checked; };
             item.appendChild(cb);
             const det = el('div', 'details');
-            det.appendChild(el('div', 'title', '<code>' + intf.name + '</code><span class="badge-new">NEW</span>'));
-            det.appendChild(el('div', 'meta', 'Realized by: ' + (intf.realized_by||'—')));
+            det.appendChild(el('div', 'title', '<code>' + esc(intf.name) + '</code><span class="badge-new">NEW</span>'));
+            det.appendChild(el('div', 'meta', 'Realized by: ' + esc(intf.realized_by||'—')));
             const fields = el('div', 'fields');
             fields.appendChild(field('Name',        inp(intf.name,            v => S.new_interfaces[i].name = v, '160px')));
             fields.appendChild(field('Realized By', inp(intf.realized_by||'', v => S.new_interfaces[i].realized_by = v, '160px')));
@@ -642,8 +808,8 @@ function render() {
             cb.onchange = () => { S.ports[i]._sel = cb.checked; };
             item.appendChild(cb);
             const det = el('div', 'details');
-            det.appendChild(el('div', 'title', '<code>' + port.name + '</code>'));
-            det.appendChild(el('div', 'meta', 'Provides: ' + (port.provided||[]).join(', ') + ' | Requires: ' + (port.required||[]).join(', ')));
+            det.appendChild(el('div', 'title', '<code>' + esc(port.name) + '</code>'));
+            det.appendChild(el('div', 'meta', 'Provides: ' + esc((port.provided||[]).join(', ')) + ' | Requires: ' + esc((port.required||[]).join(', '))));
             const fields = el('div', 'fields');
             fields.appendChild(field('Port Name', inp(port.name, v => S.ports[i].name = v, '160px')));
             det.appendChild(fields);
@@ -657,113 +823,195 @@ function render() {
     const mDiv = el('div', 'section');
     mDiv.appendChild(el('h2', '', '📊 Diagrams'));
 
-    // Tab bar
     const tabs = el('div', 'tabs');
     const tabDefs = [
-        { id: 'static',   label: '🏗️ Static View' },
-        { id: 'analysis', label: '🔄 Analysis View' },
-        { id: 'dynamic',  label: '⚡ Dynamic View' },
+        { id: 'static',   label: '🏗️ Static View',   ta: 'static-ta',     prev: 'static-preview'   },
+        { id: 'analysis', label: '🔄 Analysis View', ta: 'analysis-ta',   prev: 'analysis-preview' },
+        { id: 'dynamic',  label: '⚡ Dynamic View',  ta: 'dynamic-op-ta', prev: 'dynamic-preview'  },
     ];
-    let activeTab = 'static';
-    const tabBtns = {};
-    const tabPanels = {};
+    const tabBtns = {}, tabPanels = {};
+    function showTab(id) {
+        S.active_tab = id;
+        tabDefs.forEach(t => {
+            tabBtns[t.id].className   = 'tab-btn'   + (t.id === id ? ' active' : '');
+            tabPanels[t.id].className = 'tab-panel' + (t.id === id ? ' active' : '');
+        });
+        const t  = tabDefs.find(x => x.id === id);
+        const ta = document.getElementById(t.ta);
+        if (ta) renderMermaid(t.prev, ta.value);
+    }
     tabDefs.forEach(t => {
-        const btn = el('button', 'tab-btn' + (t.id === activeTab ? ' active' : ''), t.label);
-        btn.onclick = () => {
-            activeTab = t.id;
-            tabDefs.forEach(tt => {
-                tabBtns[tt.id].className = 'tab-btn' + (tt.id === activeTab ? ' active' : '');
-                tabPanels[tt.id].className = 'tab-panel' + (tt.id === activeTab ? ' active' : '');
-            });
-            if (activeTab === 'static')   renderMermaid('static-preview',   document.getElementById('static-ta').value);
-            if (activeTab === 'analysis') renderMermaid('analysis-preview', document.getElementById('analysis-ta').value);
-            if (activeTab === 'dynamic')  renderMermaid('dynamic-preview',  document.getElementById('dynamic-ta').value);
-        };
+        const btn = el('button', 'tab-btn', t.label);
+        btn.onclick = () => showTab(t.id);
         tabBtns[t.id] = btn;
         tabs.appendChild(btn);
     });
     mDiv.appendChild(tabs);
 
     // ── Static View panel ─────────────────────────────────────────────────
-    const staticPanel = el('div', 'tab-panel active');
-    staticPanel.id = 'tab-static';
-    const staticEd = el('div', 'med');
-    staticEd.appendChild(el('label', '', 'Class / Block definition diagram (edit Mermaid below)'));
-    const staticTa = document.createElement('textarea'); staticTa.id = 'static-ta';
-    staticTa.value = S.static_view || 'classDiagram\\n    class ' + comp + ' {\\n        +operation()\\n    }';
-    staticTa.oninput = () => { S.static_view = staticTa.value; };
-    staticEd.appendChild(staticTa);
-    const staticRef = el('button', 'btn-ref', '↻ Preview');
-    staticRef.onclick = () => renderMermaid('static-preview', staticTa.value);
-    staticEd.appendChild(staticRef);
-    const staticPrev = el('div', 'preview'); staticPrev.id = 'static-preview';
-    staticEd.appendChild(staticPrev);
-    staticPanel.appendChild(staticEd);
+    const staticPanel = el('div', 'tab-panel'); staticPanel.id = 'tab-static';
     tabPanels['static'] = staticPanel;
+    staticPanel.appendChild(el('div', 'hint',
+        'Generated from the operations and interfaces selected above. If you edit it here, the edited diagram decides which operations, interfaces and realizations are applied.'));
+    const st = mermaidEditor(staticPanel, 'Class / Block definition diagram (Mermaid classDiagram)',
+        'static-ta', 'static-preview', S.static_view,
+        v => { S.static_view = v; S.static_view_edited = true; updateStaticBadge(); });
+    const stReset = el('button', 'btn-ref', '↺ Reset to proposal');
+    stReset.onclick = () => { S.static_view_edited = false; refreshStatic(true); };
+    st.row.appendChild(stReset);
+    const stBadge = el('span', 'hint'); stBadge.id = 'static-badge';
+    st.row.appendChild(stBadge);
     mDiv.appendChild(staticPanel);
 
     // ── Analysis View panel ───────────────────────────────────────────────
-    const analysisPanel = el('div', 'tab-panel');
-    analysisPanel.id = 'tab-analysis';
-    const anaEd = el('div', 'med');
-    anaEd.appendChild(el('label', '', 'Analysis Activity Diagram'));
-    const anaTa = document.createElement('textarea'); anaTa.id = 'analysis-ta'; anaTa.value = S.updated_ad;
-    anaTa.oninput = () => { S.updated_ad = anaTa.value; };
-    anaEd.appendChild(anaTa);
-    const anaRef = el('button', 'btn-ref', '↻ Preview'); anaRef.onclick = () => renderMermaid('analysis-preview', anaTa.value);
-    anaEd.appendChild(anaRef);
-    const anaPrev = el('div', 'preview'); anaPrev.id = 'analysis-preview';
-    anaEd.appendChild(anaPrev);
-    analysisPanel.appendChild(anaEd);
+    const analysisPanel = el('div', 'tab-panel'); analysisPanel.id = 'tab-analysis';
     tabPanels['analysis'] = analysisPanel;
+    mermaidEditor(analysisPanel, 'Analysis Activity Diagram', 'analysis-ta', 'analysis-preview',
+        S.updated_ad, v => { S.updated_ad = v; });
     mDiv.appendChild(analysisPanel);
 
     // ── Dynamic View panel ────────────────────────────────────────────────
-    const dynamicPanel = el('div', 'tab-panel');
-    dynamicPanel.id = 'tab-dynamic';
-
-    // Op selector
+    const dynamicPanel = el('div', 'tab-panel'); dynamicPanel.id = 'tab-dynamic';
+    tabPanels['dynamic'] = dynamicPanel;
     if (S.new_operations.length) {
         const opSel = el('div', 'op-select');
-        opSel.appendChild(el('label', '', 'Operation AD for: '));
+        opSel.appendChild(el('label', '', 'Operation: '));
         const opNames = S.new_operations.map(o => o.name);
-        opSel.appendChild(selEl(opNames, S.sel_op || opNames[0], v => {
+        const opSelEl = selEl(opNames, S.sel_op || opNames[0], v => {
             S.sel_op = v;
-            document.getElementById('dynamic-op-ta').value = S.op_ads[v] || defaultOpAD(S.new_operations.find(o => o.name === v));
-            renderMermaid('dynamic-preview', document.getElementById('dynamic-op-ta').value);
-        }));
+            const ta = document.getElementById('dynamic-op-ta');
+            ta.value = S.op_ads[v] || defaultOpAD(S.new_operations.find(o => o.name === v));
+            renderMermaid('dynamic-preview', ta.value);
+        });
+        opSelEl.id = 'op-sel';
+        opSel.appendChild(opSelEl);
         dynamicPanel.appendChild(opSel);
+        dynamicPanel.appendChild(el('div', 'hint',
+            'Only operations whose diagram you edit here are created from this editor; the others are generated by the LLM after Apply.'));
+        const curOp = S.new_operations.find(o => o.name === S.sel_op) || S.new_operations[0];
+        mermaidEditor(dynamicPanel, 'Operation Activity Diagram', 'dynamic-op-ta', 'dynamic-preview',
+            S.op_ads[S.sel_op] || defaultOpAD(curOp),
+            v => { if (S.sel_op) S.op_ads[S.sel_op] = v; });
+    } else {
+        dynamicPanel.appendChild(el('p', 'hint',
+            'No new operations are proposed, so there is no operation activity diagram to edit.'));
     }
-
-    const opEd = el('div', 'med');
-    opEd.appendChild(el('label', '', 'Operation Activity Diagram'));
-    const opTa = document.createElement('textarea'); opTa.id = 'dynamic-op-ta';
-    const curOp = S.new_operations.find(o => o.name === S.sel_op) || S.new_operations[0];
-    opTa.value = S.sel_op ? (S.op_ads[S.sel_op] || defaultOpAD(curOp)) : 'flowchart TD\\n    Start([Start]) --> End([End])';
-    opTa.oninput = () => { if (S.sel_op) S.op_ads[S.sel_op] = opTa.value; };
-    opEd.appendChild(opTa);
-    const opRef = el('button', 'btn-ref', '↻ Preview'); opRef.onclick = () => renderMermaid('dynamic-preview', opTa.value);
-    opEd.appendChild(opRef);
-    const opPrev = el('div', 'preview'); opPrev.id = 'dynamic-preview';
-    opEd.appendChild(opPrev);
-    dynamicPanel.appendChild(opEd);
-    tabPanels['dynamic'] = dynamicPanel;
     mDiv.appendChild(dynamicPanel);
 
     app.appendChild(mDiv);
+
+    // Feedback
+    const fbDiv = el('div', 'section');
+    fbDiv.appendChild(el('h2', '', '💬 Feedback (optional)'));
+    const fbTa = document.createElement('textarea');
+    fbTa.id = 'feedback-ta'; fbTa.className = 'fb';
+    fbTa.placeholder = 'Describe what should change. "Regenerate with Feedback" sends this to the LLM to redesign the operations and interfaces.';
+    fbDiv.appendChild(fbTa);
+    app.appendChild(fbDiv);
 
     // Buttons
     const btnRow = el('div', 'btn-row');
     const cancelBtn = el('button', 'btn-cancel', '✗ Cancel');
     cancelBtn.onclick = () => vscodeApi.postMessage({ command: 'cancel' });
+    const regenBtn = el('button', 'btn-regen', '🔁 Regenerate with Feedback');
+    regenBtn.onclick = () => {
+        const fb = fbTa.value.trim();
+        if (!fb) { fbTa.focus(); fbTa.placeholder = 'Enter feedback first, then click Regenerate.'; return; }
+        vscodeApi.postMessage({ command: 'feedback', feedback: fb });
+    };
     const applyBtn = el('button', 'btn-apply', '✅ Apply to Rhapsody');
     applyBtn.onclick = applyChanges;
     btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(regenBtn);
     btnRow.appendChild(applyBtn);
     app.appendChild(btnRow);
 
-    // Auto-preview active tab
-    setTimeout(() => renderMermaid('static-preview', staticTa.value), 100);
+    // Keep the Static View in sync with the form (checkboxes, names, types…)
+    const onFormChange = e => {
+        if (e.target.closest('.tab-panel') || e.target.id === 'feedback-ta') return;
+        refreshStatic(false);
+    };
+    app.addEventListener('input',  onFormChange);
+    app.addEventListener('change', onFormChange);
+
+    refreshStatic(false);
+    showTab(S.active_tab || 'static');
+}
+
+// Renaming an operation keeps its edited Dynamic View diagram and the selector in sync
+function renameOp(i, newName) {
+    const oldName = S.new_operations[i].name;
+    S.new_operations[i].name = newName;
+    if (S.op_ads[oldName] !== undefined) { S.op_ads[newName] = S.op_ads[oldName]; delete S.op_ads[oldName]; }
+    if (S.sel_op === oldName) S.sel_op = newName;
+    const sel = document.getElementById('op-sel');
+    if (sel && sel.options[i]) { sel.options[i].value = newName; sel.options[i].textContent = newName; }
+}
+
+// Mermaid textarea + debounced live preview + "Preview" button
+function mermaidEditor(panel, labelText, taId, prevId, value, onChange) {
+    const ed = el('div', 'med');
+    ed.appendChild(el('label', '', esc(labelText)));
+    const ta = document.createElement('textarea');
+    ta.id = taId; ta.value = value || '';
+    let timer = null;
+    ta.oninput = () => {
+        onChange(ta.value);
+        clearTimeout(timer);
+        timer = setTimeout(() => renderMermaid(prevId, ta.value), 600);
+    };
+    ed.appendChild(ta);
+    const row = el('div', 'ed-actions');
+    const ref = el('button', 'btn-ref', '↻ Preview');
+    ref.onclick = () => renderMermaid(prevId, ta.value);
+    row.appendChild(ref);
+    ed.appendChild(row);
+    const prev = el('div', 'preview'); prev.id = prevId;
+    ed.appendChild(prev);
+    panel.appendChild(ed);
+    return { ta, row };
+}
+
+function mId(name) { return String(name || '').replace(/\\W/g, '_'); }
+
+function buildStaticView() {
+    const visSym = v => v === 'public' ? '+' : v === 'protected' ? '#' : '-';
+    const sig = op => mId(op.name) + '(' + (op.arguments||[]).map(a => a.name + ': ' + (a.type||'')).join(', ') + ') ' + (op.return_type||'void');
+    let cd = 'classDiagram\\n    class ' + mId(comp) + ' {\\n';
+    S.new_operations.filter(o => o._sel).forEach(op => {
+        cd += '        ' + visSym(op.visibility || 'private') + sig(op) + '\\n';
+    });
+    cd += '    }\\n';
+    S.new_interfaces.filter(i => i._sel).forEach(intf => {
+        cd += '    class ' + mId(intf.name) + ' {\\n        <<Interface>>\\n';
+        (intf.operations||[]).forEach(op => { cd += '        +' + sig(op) + '\\n'; });
+        cd += '    }\\n';
+        // Realizations only for valid Mermaid identifiers (e.g. not use-case names with spaces)
+        if (intf.realized_by && /^\\w+$/.test(intf.realized_by)) {
+            cd += '    ' + intf.realized_by + ' ..|> ' + mId(intf.name) + ' : realizes\\n';
+        }
+    });
+    return cd;
+}
+
+let staticTimer = null;
+function refreshStatic(force) {
+    if (S.static_view_edited && !force) { updateStaticBadge(); return; }
+    S.static_view = buildStaticView();
+    const ta = document.getElementById('static-ta');
+    if (ta) ta.value = S.static_view;
+    updateStaticBadge();
+    if (S.active_tab === 'static') {
+        clearTimeout(staticTimer);
+        staticTimer = setTimeout(() => renderMermaid('static-preview', S.static_view), 300);
+    }
+}
+
+function updateStaticBadge() {
+    const b = document.getElementById('static-badge');
+    if (b) b.textContent = S.static_view_edited
+        ? '✏️ Edited: this diagram will be used when you click Apply'
+        : 'Auto-generated from the selection above';
 }
 
 function defaultOpAD(op) {
@@ -772,29 +1020,32 @@ function defaultOpAD(op) {
 }
 
 async function renderMermaid(id, code) {
-    const el = document.getElementById(id);
-    if (!el || !code || !code.trim()) return;
+    const target = document.getElementById(id);
+    if (!target || !code || !code.trim()) return;
     try {
         const { svg } = await mermaid.render('m' + id + Date.now(), code);
-        el.innerHTML = svg;
+        target.innerHTML = svg;
     } catch(e) {
-        el.innerHTML = '<span style="color:#f87171;font-size:11px">⚠ ' + e.message + '</span>';
+        target.innerHTML = '<span style="color:#f87171;font-size:11px">⚠ ' + esc(e.message) + '</span>';
     }
 }
 
 function applyChanges() {
+    const strip = x => { const {_sel, ...r} = x; return r; };
     vscodeApi.postMessage({ command: 'apply', data: {
-        component      : comp,
-        usecase        : RAW.usecase,
-        updated_ad     : S.updated_ad,
-        static_view    : S.static_view,
-        req_map        : RAW.req_map || {},
-        op_ads         : S.op_ads,
-        new_operations : S.new_operations.filter(o => o._sel).map(o => { const {_sel,...r}=o; return r; }),
-        new_interfaces : S.new_interfaces.filter(i => i._sel).map(i => { const {_sel,...r}=i; return r; }),
-        ibd_delta      : {
-            ports: S.ports.filter(p => p._sel).map(p => { const {_sel,...r}=p; return r; }),
-            links: S.links.filter(l => l._sel).map(l => { const {_sel,...r}=l; return r; }),
+        component          : comp,
+        usecase            : RAW.usecase,
+        updated_ad         : S.updated_ad,
+        static_view        : S.static_view,
+        static_view_edited : S.static_view_edited,
+        req_map            : RAW.req_map || {},
+        op_ads             : S.op_ads,
+        new_operations     : S.new_operations.filter(o => o._sel).map(strip),
+        new_interfaces     : S.new_interfaces.filter(i => i._sel).map(strip),
+        realizations       : RAW.realizations || [],
+        ibd_delta          : {
+            ports: S.ports.filter(p => p._sel).map(strip),
+            links: S.links.filter(l => l._sel).map(strip),
         },
     }});
 }
@@ -803,6 +1054,8 @@ render();
 </script>
 </body>
 </html>`;
+}
+
 async function handleRhapsodyChat(request, context, stream, token) {
     const commandName = request.command || '';
     outputChannel && outputChannel.appendLine('[debug] command=' + commandName + ' prompt=' + request.prompt.substring(0, 50));
@@ -815,8 +1068,25 @@ async function handleRhapsodyChat(request, context, stream, token) {
     }
 
     if (intent.intent === 'design_resume') {
-        const resumeText = intent.fullText.replace(/\brb_\w+\b/g, '').replace(/^\s*(apply|resume)\b\s*/i, '').trim() || 'apply';
-        await runUnifiedGraph(intent.component, [], {}, resumeText, stream, token);
+        let resumeValue;
+        if (/--from-review\b/.test(intent.fullText)) {
+            // Edits / feedback submitted from a review webview
+            const f = reviewEditsFile(intent.component);
+            try {
+                resumeValue = JSON.parse(fs.readFileSync(f, 'utf8'));
+                fs.unlinkSync(f);
+            } catch (e) {
+                stream.markdown(`**Could not read the review edits** (\`${e.message}\`). Open the review again and resubmit.`);
+                return;
+            }
+            stream.markdown(resumeValue.approved
+                ? 'Continuing with your approved changes...'
+                : 'Regenerating with your feedback...');
+        } else {
+            // Remove only the FIRST component name, so names inside pasted Mermaid survive
+            resumeValue = intent.fullText.replace(/\brb_\w+\b/, '').replace(/^\s*(apply|resume)\b\s*/i, '').trim() || 'apply';
+        }
+        await runUnifiedGraph(intent.component, [], {}, resumeValue, stream, token);
         return;
     }
 
@@ -901,6 +1171,22 @@ function activate(context) {
         }
     );
     context.subscriptions.push(reviewCmd);
+
+    const reviewAdCmd = vscode.commands.registerCommand('rhapsody.design.reviewAd',
+        async (component, outputFile) => {
+            if (!outputFile || !fs.existsSync(outputFile)) {
+                vscode.window.showErrorMessage('AD review data not found. Run @rhapsody /design first.');
+                return;
+            }
+            const output = JSON.parse(fs.readFileSync(outputFile, 'utf8'));
+            if (output.status !== 'interrupted' || (output.data || {}).phase !== 'ad_review') {
+                vscode.window.showWarningMessage('This Analysis AD review is no longer pending.');
+                return;
+            }
+            openAdReviewWebview(context, output.data || {}, component, output.requirements_considered || []);
+        }
+    );
+    context.subscriptions.push(reviewAdCmd);
 
     outputChannel.appendLine('[Rhapsody] Extension activated (LM proxy on :3000)');
 }

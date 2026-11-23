@@ -10,6 +10,100 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
+def _parse_static_view(static_view: str, component_name: str,
+                       base_ops: list, base_intfs: list) -> tuple[list, list, list]:
+    """Turn the reviewer-edited Static View (Mermaid classDiagram) into
+    (operations, interfaces, realizations). Metadata the diagram cannot carry
+    (req_ids, rationale, usecase, ...) is kept from the proposal by name."""
+    from mermaid_to_bdd import from_mermaid
+    plan = from_mermaid(static_view, component_name)
+    ops_by_name  = {o.get("name"): o for o in base_ops}
+    intf_by_name = {i.get("name"): i for i in base_intfs}
+
+    ops, intfs = [], []
+    for cls in plan.get("classes", []):
+        if cls["name"] == component_name:
+            for op in cls.get("operations", []):
+                merged = {**ops_by_name.get(op["name"], {}), **op}
+                if not op.get("stereotypes"):
+                    merged.pop("stereotypes", None)
+                ops.append(merged)
+        else:
+            base = intf_by_name.get(cls["name"], {})
+            intfs.append({
+                **base,
+                "name"       : cls["name"],
+                "stereotypes": cls.get("stereotypes") or base.get("stereotypes") or ["Interface"],
+                "operations" : cls.get("operations", []),
+            })
+
+    realizations = list(plan.get("realizations", []))
+    for intf in intfs:
+        real = next((r for r in realizations if r["general"] == intf["name"]), None)
+        if real:
+            intf["realized_by"] = real["specific"]
+    return ops, intfs, realizations
+
+
+def normalize_edits(edits: dict, component_name: str, usecase: str = "") -> dict:
+    """Normalize the design-review webview payload into graph/apply state fields.
+
+    - new_operations / new_interfaces / ibd_delta / op_ads / updated_ad / req_map as sent
+    - if the reviewer edited the Static View, it is the source of truth for
+      operations, interfaces and realizations
+    - bdd_delta is (re)built so the selected interfaces are actually created
+    """
+    usecase    = usecase or edits.get("usecase", "")
+    new_ops    = [dict(o) for o in edits.get("new_operations", []) or []]
+    new_intfs  = [dict(i) for i in edits.get("new_interfaces", []) or []]
+    realizations = None
+
+    static_view = (edits.get("static_view") or "").strip()
+    if edits.get("static_view_edited") and static_view:
+        try:
+            new_ops, new_intfs, realizations = _parse_static_view(
+                static_view, component_name, new_ops, new_intfs)
+            print(f"[Edits] Static View parsed: {len(new_ops)} ops, {len(new_intfs)} intfs",
+                  file=sys.stderr)
+        except Exception as e:
+            print(f"[Edits] Static View parse failed, using form values: {e}", file=sys.stderr)
+
+    for op in new_ops:
+        op.setdefault("usecase", usecase)
+
+    if realizations is None:
+        names = {i.get("name") for i in new_intfs}
+        realizations = [r for r in edits.get("realizations", []) or []
+                        if r.get("general") in names]
+        for intf in new_intfs:
+            rb = intf.get("realized_by")
+            if rb and not any(r.get("general") == intf["name"] for r in realizations):
+                realizations.append({"specific": rb, "general": intf["name"]})
+            elif rb:
+                for r in realizations:
+                    if r.get("general") == intf["name"]:
+                        r["specific"] = rb   # reviewer may have edited "Realized By"
+
+    for intf in new_intfs:
+        intf.setdefault("stereotypes", ["Interface"])
+
+    op_names = {o.get("name") for o in new_ops}
+    op_ads = {k: v for k, v in (edits.get("op_ads") or {}).items()
+              if k in op_names and v and v.strip()}
+
+    return {
+        "usecase"       : usecase,
+        "updated_ad"    : edits.get("updated_ad", ""),
+        "req_map"       : edits.get("req_map") or {},
+        "new_operations": new_ops,
+        "new_interfaces": new_intfs,
+        "bdd_delta"     : {"classes": new_intfs, "realizations": realizations,
+                           "generalizations": []},
+        "ibd_delta"     : edits.get("ibd_delta") or {"ports": [], "links": []},
+        "op_ads"        : op_ads,
+    }
+
+
 def apply_design_state(state: dict, component_name: str) -> dict:
     """Apply new operations, interfaces and IBD changes to Rhapsody."""
     errors = []
@@ -120,7 +214,10 @@ def apply_design_state(state: dict, component_name: str) -> dict:
             from design_graph_unified import OP_AD_PROMPT
             import json as _j
 
+            already_done = {o["operation"] for o in op_ads if o.get("operation")}
             for op in new_ops:
+                if op.get("name") in already_done:
+                    continue   # reviewer-edited AD already created above
                 try:
                     prompt = OP_AD_PROMPT.format(
                         op_name    = op.get("name",""),
@@ -130,7 +227,8 @@ def apply_design_state(state: dict, component_name: str) -> dict:
                         req_ids    = ", ".join(op.get("req_ids",[])),
                         updated_ad = state.get("updated_ad",""),
                     )
-                    mermaid = "flowchart TD\n" + llm_call(prompt)
+                    from design_graph_unified import _with_flowchart_header
+                    mermaid = _with_flowchart_header(llm_call(prompt))
                     if "```" in mermaid:
                         mermaid = "\n".join(l for l in mermaid.split("\n")
                                             if not l.strip().startswith("```"))
@@ -169,25 +267,10 @@ if __name__ == "__main__":
     with open(args.edit, encoding="utf-8") as f:
         edit_data = json.load(f)
 
-    # edit_data keys: component, updated_ad, op_ads, new_operations,
-    #                 new_interfaces, ibd_delta
-    result = apply_design_state(edit_data, args.component)
-
-    # Also generate operation ADs from the edited mermaid
-    if edit_data.get("op_ads"):
-        import win32com.client
-        from create_operation_ad import create_operation_ad
-        r = win32com.client.GetActiveObject("Rhapsody2.Application")
-        for op_name, mermaid in edit_data["op_ads"].items():
-            if not mermaid or not mermaid.strip():
-                continue
-            try:
-                ad_result = create_operation_ad(args.component, op_name, mermaid, r)
-                print(f"[ApplyDirect] Op AD {op_name}: {ad_result.get('success')}")
-                result.setdefault("operation_ads", []).append(
-                    {"operation": op_name, "result": ad_result})
-            except Exception as e:
-                print(f"[ApplyDirect] Op AD error {op_name}: {e}")
+    # edit_data = webview payload: component, usecase, updated_ad, static_view,
+    #             req_map, op_ads, new_operations, new_interfaces, ibd_delta
+    state  = normalize_edits(edit_data, args.component)
+    result = apply_design_state(state, args.component)
 
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
