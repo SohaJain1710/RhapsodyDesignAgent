@@ -992,6 +992,13 @@ def design_elements_parse_node(state: DesignState) -> dict:
     new_ops, new_intfs = v["new_operations"], v["new_interfaces"]
     for op in new_ops:
         op["usecase"] = state["current_usecase"]
+    if extract_json.last_error:
+        v["warnings"].insert(0, f"Design step: {extract_json.last_error} - nothing could be "
+                                f"proposed. Use 'Regenerate with Feedback' to retry.")
+    elif not new_ops and not new_intfs and not v["realizations"]:
+        v["warnings"].insert(0, "The LLM proposed no new operations, interfaces or realizations "
+                                "(it considers the existing design sufficient). If that is wrong, "
+                                "use 'Regenerate with Feedback'.")
     for w in v["warnings"]:
         print(f"[DesignElements] WARNING: {w}")
     print(f"[DesignElements] Ops: {len(new_ops)}, Intfs: {len(new_intfs)}, "
@@ -1057,11 +1064,17 @@ def design_ibd_parse_node(state: DesignState) -> dict:
         return {}
     from plan_normalize import validate_ibd
     result = extract_json(state["llm_response"], default={"ports": [], "links": []})
+    parse_err = extract_json.last_error
     v = validate_ibd(result, state.get("module_names") or [], state["component_name"],
                      (state.get("bdd_delta") or {}).get("realizations", []),
                      list(state.get("known_interfaces") or [])
                      + [i.get("name") for i in state.get("new_interfaces", []) or []],
                      state.get("existing_ports") or {})
+    if parse_err:
+        v["warnings"].insert(0, f"IBD step: {parse_err} - no ports proposed.")
+    elif not v["ports"] and not v["links"]:
+        v["warnings"].insert(0, "IBD: no new ports/connectors needed (all interfaces of this step "
+                                "already have ports with these contracts, or none were proposed).")
     for w in v["warnings"]:
         print(f"[DesignIBD] WARNING: {w}")
     print(f"[DesignIBD] Ports: {len(v['ports'])}, Links: {len(v['links'])}")

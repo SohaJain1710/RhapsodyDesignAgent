@@ -93,29 +93,64 @@ def llm_call(
     raise RuntimeError(f"LLM relay timeout after {timeout}s")
 
 
+def _json_candidates(text: str):
+    """Yield balanced {...} substrings, ignoring braces inside JSON strings."""
+    for start in [i for i, ch in enumerate(text) if ch == "{"]:
+        depth, in_str, esc = 0, False, False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    yield text[start:i + 1]
+                    break
+
+
+def _lenient(s: str) -> str:
+    """Remove // and /* */ comments and trailing commas (common LLM slips)."""
+    s = re.sub(r'("(?:\\.|[^"\\])*")|//[^\n]*|/\*.*?\*/',
+               lambda m: m.group(1) or "", s, flags=re.S)
+    return re.sub(r",\s*([}\]])", r"\1", s)
+
+
 def extract_json(text: str, default: dict | None = None) -> dict:
-    """Extract first JSON object from LLM response."""
+    """Extract the first (largest parseable) JSON object from an LLM response.
+    Sets extract_json.last_error when nothing could be parsed."""
+    extract_json.last_error = ""
     if not isinstance(text, str):
+        extract_json.last_error = "LLM response is not text"
         return default if default is not None else {}
-
     cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`").strip()
-    start = cleaned.find("{")
-    if start == -1:
-        print(f"[LLMNode] No JSON object found in response: {cleaned[:100]!r}")
+    if "{" not in cleaned:
+        extract_json.last_error = f"no JSON object in LLM response: {cleaned[:120]!r}"
+        print(f"[LLMNode] {extract_json.last_error}")
         return default if default is not None else {}
-
-    depth = 0
-    for i, ch in enumerate(cleaned[start:], start):
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(cleaned[start:i+1])
-                except json.JSONDecodeError:
-                    pass
+    for cand in _json_candidates(cleaned):
+        for variant in (cand, _lenient(cand)):
+            try:
+                obj = json.loads(variant)
+                if isinstance(obj, dict):
+                    return obj
+            except json.JSONDecodeError:
+                pass
+    extract_json.last_error = f"LLM response could not be parsed as JSON: {cleaned[:120]!r}"
+    print(f"[LLMNode] {extract_json.last_error}")
     return default if default is not None else {}
+
+
+extract_json.last_error = ""
 
 
 def llm_json(
