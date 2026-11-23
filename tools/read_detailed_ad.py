@@ -41,6 +41,7 @@ Output format:
 Usage:
     python read_detailed_ad.py --component rb_sdm_SafeDataMgt --diagram LoadSdmDataAD
 """
+import rhapsody_connect  # connect to the running Rhapsody (repairs COM cache, picks instance with open project)
 import sys
 import os
 import json
@@ -49,7 +50,7 @@ import win32com.client
 
 
 def get_rhapsody():
-    rhapsody = win32com.client.GetActiveObject("Rhapsody2.Application")
+    rhapsody = rhapsody_connect.get_active_rhapsody()
     project  = rhapsody.activeProject()
     if not project:
         raise RuntimeError("No active project")

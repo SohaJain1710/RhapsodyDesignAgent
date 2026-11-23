@@ -97,9 +97,9 @@ def get_conventions(project_name: str) -> dict:
 
 def get_conventions_from_rhapsody() -> dict:
     """Connect to Rhapsody and auto-detect conventions."""
-    import win32com.client
+    import rhapsody_connect
     try:
-        rhapsody     = win32com.client.GetActiveObject("Rhapsody2.Application")
+        rhapsody     = rhapsody_connect.get_active_rhapsody()
         project      = rhapsody.activeProject()
         project_name = project.name if project else "Unknown"
         import sys; print(f"[ProjectConfig] Project: {project_name}", file=sys.stderr)

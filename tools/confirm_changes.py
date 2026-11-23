@@ -8,6 +8,7 @@ Usage:
     python confirm_changes.py --component rb_sdm_SafeDataMgt
     python confirm_changes.py --component rb_sdm_SafeDataMgt --reject
 """
+import rhapsody_connect  # connect to the running Rhapsody (repairs COM cache, picks instance with open project)
 import sys
 import os
 import argparse
@@ -19,7 +20,7 @@ from read_detailed_ad import find_package_recursive, find_dd_packages
 
 
 def get_rhapsody():
-    rhapsody = win32com.client.GetActiveObject("Rhapsody2.Application")
+    rhapsody = rhapsody_connect.get_active_rhapsody()
     return rhapsody, rhapsody.activeProject()
 
 

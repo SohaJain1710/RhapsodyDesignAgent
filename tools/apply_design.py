@@ -4,6 +4,7 @@ apply_design.py
 Standalone apply function — used when graph checkpoint is consumed
 but we still need to apply the design state to Rhapsody.
 """
+import rhapsody_connect  # connect to the running Rhapsody (repairs COM cache, picks instance with open project)
 import sys
 import os
 
@@ -115,7 +116,7 @@ def apply_design_state(state: dict, component_name: str) -> dict:
         from create_bdd import create_bdd_from_plan
         from create_ibd import create_ibd
 
-        r = win32com.client.GetActiveObject("Rhapsody2.Application")
+        r = rhapsody_connect.get_active_rhapsody()
 
         # ── Update Analysis AD if edited ──────────────────────────────────────
         updated_ad = state.get("updated_ad", "")

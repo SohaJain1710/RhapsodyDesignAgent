@@ -1,12 +1,14 @@
 """
 Shared Rhapsody COM helpers — used by all tools.
 """
+import rhapsody_connect  # connect to the running Rhapsody (repairs COM cache, picks instance with open project)
 import win32com.client
 import time
 import sys
 def get_rhapsody():
-    rhapsody = win32com.client.Dispatch("Rhapsody2.Application")
-    return rhapsody, rhapsody.projects.Item(1)
+    # Attach to the RUNNING instance (Dispatch could start a new, empty Rhapsody)
+    rhapsody = rhapsody_connect.get_active_rhapsody()
+    return rhapsody, rhapsody.activeProject()
 
 
 def find_package_by_name(parent, name):

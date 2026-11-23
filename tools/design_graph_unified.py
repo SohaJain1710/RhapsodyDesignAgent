@@ -22,6 +22,7 @@ Full pipeline:
          → next_usecase → (loop or END)
 """
 
+import rhapsody_connect  # connect to the running Rhapsody (repairs COM cache, picks instance with open project)
 import os
 import sys
 import json
@@ -334,8 +335,8 @@ def ingest_node(state: DesignState) -> dict:
             excel_path = state.get("excel_path", "")
             if not excel_path:
                 import glob
-                files = glob.glob(f"RUNTIME_DIR + "/"{component_name}*.xlsx") + \
-                        glob.glob("RUNTIME_DIR + "/"requirements*.xlsx")
+                files = glob.glob(os.path.join(RUNTIME_DIR, f"{component_name}*.xlsx")) + \
+                        glob.glob(os.path.join(RUNTIME_DIR, "requirements*.xlsx"))
                 excel_path = files[0] if files else ""
 
             if not excel_path:
@@ -575,7 +576,7 @@ def read_context_node(state: DesignState) -> dict:
         from read_ibd import read_ibd_from_package
         from ibd_to_mermaid import mermaid_with_context as ibd_mermaid
 
-        r  = win32com.client.GetActiveObject("Rhapsody2.Application")
+        r  = rhapsody_connect.get_active_rhapsody()
         p  = r.activeProject()
         sw = get_sw_model(p) or p
 
@@ -1020,7 +1021,7 @@ def apply_node(state: DesignState) -> dict:
         from create_bdd import create_bdd_from_plan
         from create_ibd import create_ibd
 
-        r = win32com.client.GetActiveObject("Rhapsody2.Application")
+        r = rhapsody_connect.get_active_rhapsody()
         print(f"[Apply] Connected to Rhapsody: {r.activeProject().name}", file=sys.stderr)
 
         # ── Approved Analysis AD (HITL #1) → write back to Rhapsody ──────────
@@ -1138,7 +1139,7 @@ def fan_out_ad_node(state: DesignState):
                                     if not l.strip().startswith("```"))
             mermaid = _sanitize_mermaid(mermaid)
 
-            r = win32com.client.GetActiveObject("Rhapsody2.Application")
+            r = rhapsody_connect.get_active_rhapsody()
             result = create_operation_ad(state["component_name"], op_name, mermaid, r)
             print(f"[FanOut] {op_name}: {result.get('success')}")
             results.append({"operation": op_name, "result": result})
@@ -1196,7 +1197,7 @@ def apply_op_ad_node(state: OpADState) -> dict:
     try:
         import win32com.client
         from create_operation_ad import create_operation_ad
-        r      = win32com.client.GetActiveObject("Rhapsody2.Application")
+        r      = rhapsody_connect.get_active_rhapsody()
         result = create_operation_ad(
             state["component_name"], name, mermaid, r)
         print(f"[ApplyOpAD] {name}: {result.get('success')}")

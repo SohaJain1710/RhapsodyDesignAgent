@@ -9,6 +9,7 @@ Two BDDs per component:
 Usage:
     python create_bdd.py --component rb_sdm_SafeDataMgt
 """
+import rhapsody_connect  # connect to the running Rhapsody (repairs COM cache, picks instance with open project)
 import sys
 import os
 import argparse
@@ -21,7 +22,7 @@ from tools.project_config import get_conventions
 # ── COM helpers ───────────────────────────────────────────────────────────────
 
 def get_rhapsody():
-    rhapsody = win32com.client.GetActiveObject("Rhapsody2.Application")
+    rhapsody = rhapsody_connect.get_active_rhapsody()
     project  = rhapsody.activeProject()
     if not project:
         raise RuntimeError("No active project")

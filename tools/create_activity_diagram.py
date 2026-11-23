@@ -11,6 +11,7 @@ Fixed issues vs previous version:
   - Transitions: correct COM API (root.addTransition / createDefaultTransition)
   - Guard: correct bracket handling
 """
+import rhapsody_connect  # connect to the running Rhapsody (repairs COM cache, picks instance with open project)
 import re
 import win32com.client
 
@@ -664,7 +665,7 @@ if __name__ == "__main__":
     parser.add_argument("--name",      default="TestAD_Layout")
     args = parser.parse_args()
 
-    rhapsody = win32com.client.GetActiveObject("Rhapsody2.Application")
+    rhapsody = rhapsody_connect.get_active_rhapsody()
     project  = rhapsody.activeProject()
     conv     = get_conventions(project.name)
     print(f"[AD] Connected: {project.name} ({conv['project_type']})")
@@ -742,7 +743,7 @@ def create_or_update_ad(component_name: str, usecase: str,
     try:
         import win32com.client
         if rhapsody is None:
-            rhapsody = win32com.client.GetActiveObject("Rhapsody2.Application")
+            rhapsody = rhapsody_connect.get_active_rhapsody()
         project  = rhapsody.activeProject()
 
         from rhapsody_com import get_sw_model

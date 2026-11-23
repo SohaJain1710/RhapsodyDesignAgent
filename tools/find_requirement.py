@@ -28,6 +28,7 @@ or the requirement text itself to indicate which use case it belongs to.
 Usage:
     python find_requirement.py --component rb_sdm_SafeDataMgt --requirement SRS_SDM_999
 """
+import rhapsody_connect  # connect to the running Rhapsody (repairs COM cache, picks instance with open project)
 import sys
 import os
 import json
@@ -39,7 +40,7 @@ from read_detailed_ad import find_package_recursive, find_dd_packages
 
 
 def get_rhapsody():
-    rhapsody = win32com.client.GetActiveObject("Rhapsody2.Application")
+    rhapsody = rhapsody_connect.get_active_rhapsody()
     project  = rhapsody.activeProject()
     if not project:
         raise RuntimeError("No active project")

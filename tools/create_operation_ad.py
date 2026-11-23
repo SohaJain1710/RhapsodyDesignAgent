@@ -21,6 +21,7 @@ The Mermaid file should be a standard flowchart TD/LR:
         B -->|No| C
         C --> End
 """
+import rhapsody_connect  # connect to the running Rhapsody (repairs COM cache, picks instance with open project)
 import sys
 import os
 import argparse
@@ -34,7 +35,7 @@ from create_activity_diagram import create_activity_diagram
 
 
 def get_rhapsody():
-    rhapsody = win32com.client.GetActiveObject("Rhapsody2.Application")
+    rhapsody = rhapsody_connect.get_active_rhapsody()
     return rhapsody, rhapsody.activeProject()
 
 
