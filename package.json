@@ -1,0 +1,101 @@
+{
+  "name": "rhapsody-design-assistant",
+  "displayName": "Rhapsody Model Assistant",
+  "description": "Generate Detailed Design artifacts from requirements, via GitHub Copilot",
+  "version": "0.0.3",
+  "publisher": "oss",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "rhapsody.design.source",
+        "title": "Rhapsody: Select Requirement Source"
+      },
+      {
+        "command": "rhapsody.design.apply",
+        "title": "Rhapsody: Apply Design Changes"
+      },
+      {
+        "command": "rhapsody.design.review",
+        "title": "Rhapsody: Open Design Review Editor"
+      },
+      {
+        "command": "rhapsody.setupPython",
+        "title": "Rhapsody: Set Up Python Environment"
+      }
+    ],
+    "configuration": {
+      "title": "Rhapsody Model Assistant",
+      "properties": {
+        "rhapsody.pythonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Python interpreter used to run the design tools. Leave empty to use the environment created by **Rhapsody: Set Up Python Environment**."
+        },
+        "rhapsody.basePythonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Python 3.10+ used to *create* the managed virtual environment. Leave empty to auto-detect (`py -3`, `python`, `python3`)."
+        },
+        "rhapsody.runtimeDir": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Folder for runtime outputs (checkpoints, intermediate JSON, Mermaid files). Keep it outside OneDrive. Default: `C:\\RhapsodyAIAgent_runtime`. Requires a window reload."
+        },
+        "rhapsody.toolsRoot": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Advanced: folder containing a `tools/` directory to use instead of the tools bundled with the extension (useful while developing). Requires a window reload."
+        }
+      }
+    },
+    "chatParticipants": [
+      {
+        "id": "rhapsody.ddgen",
+        "name": "rhapsody",
+        "description": "Generate Detailed Design from requirements",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "design",
+            "description": "Generate design diagrams from requirements"
+          },
+          {
+            "name": "design_resume",
+            "description": "Resume a paused design run"
+          },
+          {
+            "name": "help",
+            "description": "Show available commands"
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "package": "vsce package --skip-license",
+    "test": "echo no test"
+  },
+  "author": "JIO2KOR",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SohaJain1710/RhapsodyDesignAgent"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.2.1"
+  },
+  "dependencies": {
+    "express": "^4.22.2"
+  }
+}
