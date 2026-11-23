@@ -15,7 +15,7 @@ _CONFIG_FILE = os.path.join(_ROOT, "config.json")
 _cfg = {}
 if os.path.exists(_CONFIG_FILE):
     try:
-        with open(_CONFIG_FILE, encoding="utf-8") as f:
+        with open(_CONFIG_FILE, encoding="utf-8-sig") as f:   # tolerate a BOM
             _cfg = json.load(f)
     except Exception:
         pass
