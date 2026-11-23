@@ -398,7 +398,9 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
         const opAds = data.op_ads || {};
         if (Object.keys(opAds).length) {
             stream.markdown('\n### ⚡ Operation Activity Diagrams (' + Object.keys(opAds).length + ')' +
-                '\n> Edit them in **Review & Edit → Dynamic View** before applying.');
+                '\n> Edit them, or regenerate one with feedback, in **Review & Edit → Dynamic View** — or reply ' +
+                '`@rhapsody /design_resume ' + comp + ' opad <OperationName>: <your feedback>` ' +
+                '(one `opad …:` line per diagram).');
             const opLinks = data.op_ad_links || {};
             Object.entries(opAds).forEach(([name, mm]) => {
                 const l = opLinks[name] || {};
@@ -553,6 +555,11 @@ function openReviewWebview(context, data, comp, outputFile, stream, token) {
         } else if (msg.command === 'feedback') {
             panel.dispose();
             await resumeFromWebview(comp, { approved: false, feedback: msg.feedback || '' });
+        } else if (msg.command === 'opad_feedback') {
+            // regenerate only this Operation AD; keep the reviewer's other edits
+            panel.dispose();
+            await resumeFromWebview(comp, { approved: false, edits: msg.data,
+                                            op_ad_feedback: { [msg.op]: msg.feedback || '' } });
         } else if (msg.command === 'cancel') {
             panel.dispose();
         }
@@ -1027,6 +1034,19 @@ function render() {
         const opBadge = el('div', 'hint'); opBadge.id = 'op-badge';
         dynamicPanel.appendChild(opBadge);
         updateOpBadge();
+        // Feedback for THIS Operation AD only
+        const opFb = document.createElement('textarea');
+        opFb.className = 'fb'; opFb.id = 'opad-feedback';
+        opFb.placeholder = 'Feedback for the selected Operation AD only (e.g. "add a check for an invalid section and return E_NOT_OK").';
+        dynamicPanel.appendChild(opFb);
+        const opFbBtn = el('button', 'btn-regen', '🔁 Regenerate this AD with Feedback');
+        opFbBtn.onclick = () => {
+            const fb = opFb.value.trim();
+            if (!fb) { opFb.focus(); opFb.placeholder = 'Enter feedback for this Operation AD first.'; return; }
+            vscodeApi.postMessage({ command: 'opad_feedback', op: S.sel_op, feedback: fb, data: collectEdits() });
+        };
+        const fbRow = el('div', 'ed-actions'); fbRow.appendChild(opFbBtn);
+        dynamicPanel.appendChild(fbRow);
     } else {
         dynamicPanel.appendChild(el('p', 'hint',
             'No new operations are proposed, so there is no operation activity diagram to edit.'));
@@ -1063,7 +1083,7 @@ function render() {
 
     // Keep the Static View in sync with the form (checkboxes, names, types…)
     const onFormChange = e => {
-        if (e.target.closest('.tab-panel') || e.target.id === 'feedback-ta') return;
+        if (e.target.closest('.tab-panel') || e.target.id === 'feedback-ta') return;   // incl. opad-feedback
         refreshStatic(false);
     };
     app.addEventListener('input',  onFormChange);
@@ -1198,8 +1218,12 @@ async function renderMermaid(id, code) {
 }
 
 function applyChanges() {
+    vscodeApi.postMessage({ command: 'apply', data: collectEdits() });
+}
+
+function collectEdits() {
     const strip = x => { const {_sel, ...r} = x; return r; };
-    vscodeApi.postMessage({ command: 'apply', data: {
+    return {
         component          : comp,
         usecase            : RAW.usecase,
         updated_ad         : S.updated_ad,
@@ -1220,7 +1244,7 @@ function applyChanges() {
             ports: S.ports.filter(p => p._sel).map(strip),
             links: S.links.filter(l => l._sel).map(strip),
         },
-    }});
+    };
 }
 
 render();

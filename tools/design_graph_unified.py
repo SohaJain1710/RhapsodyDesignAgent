@@ -80,6 +80,7 @@ class DesignState(TypedDict):
     interface_ops    : dict        # {existing interface: [operation dicts]}
     ad_only_ops      : list        # existing module ops (implementing an interface) without AD
     op_ad_links      : dict        # {op: {design action id: [analysis action ids]}} from the LLM
+    op_ad_feedback   : dict        # {op: reviewer feedback} → regenerate only these Operation ADs
     op_ads_replace   : list        # op names whose AD the reviewer edited (replace existing AD)
 
     # Shared LLM bus
@@ -1426,14 +1427,24 @@ def human_review_node(state: DesignState) -> dict:
     })
 
     result: dict = {}
+    op_ad_fb: dict = {}
     if isinstance(feedback, str):
-        approved = feedback.strip().lower() in _APPROVE_WORDS
-        fb_text  = "" if approved else feedback.strip()
+        # chat: "opad <OperationName>: <feedback>" regenerates only that Operation AD
+        import re as _re
+        for m in _re.finditer(r"(?im)^\s*opad\s+(\w+)\s*:\s*(.+?)(?=^\s*opad\s+\w+\s*:|\Z)",
+                              feedback.strip(), flags=_re.S):
+            op_ad_fb[m.group(1)] = " ".join(m.group(2).split())
+        approved = not op_ad_fb and feedback.strip().lower() in _APPROVE_WORDS
+        fb_text  = "" if (approved or op_ad_fb) else feedback.strip()
     elif isinstance(feedback, dict):
         approved = bool(feedback.get("approved", False))
         fb_text  = (feedback.get("feedback") or "").strip()
+        op_ad_fb = {k: str(v).strip() for k, v in (feedback.get("op_ad_feedback") or {}).items()
+                    if str(v).strip()}
+        if op_ad_fb:
+            approved = False
         edits    = feedback.get("edits")
-        if approved and isinstance(edits, dict):
+        if (approved or op_ad_fb) and isinstance(edits, dict):
             # Reviewer edited the design in the webview — use the edited version
             from apply_design import normalize_edits
             norm = normalize_edits(edits, state["component_name"],
@@ -1449,8 +1460,10 @@ def human_review_node(state: DesignState) -> dict:
                 "bdd_delta"     : norm["bdd_delta"],
                 "ibd_delta"     : norm["ibd_delta"],
                 "op_ads"        : norm["op_ads"],
-                "op_ads_replace": [n for n in (edits.get("op_ads_edited") or [])
-                                   if n in norm["op_ads"]],
+                # keep earlier reviewer-driven ADs (feedback rounds) + newly edited ones
+                "op_ads_replace": list(dict.fromkeys(
+                    [n for n in (state.get("op_ads_replace") or []) if n in norm["op_ads"]]
+                    + [n for n in (edits.get("op_ads_edited") or []) if n in norm["op_ads"]])),
                 "ad_only_ops"   : norm.get("ad_only_ops", []),
                 "op_ad_links"   : norm.get("op_ad_links", {}) or state.get("op_ad_links") or {},
             })
@@ -1467,12 +1480,17 @@ def human_review_node(state: DesignState) -> dict:
         approved = False
         fb_text  = str(feedback)
 
+    if op_ad_fb:
+        print(f"[HumanReview] Operation AD feedback for: {list(op_ad_fb)}")
+        result.update({"approved": False, "human_feedback": "", "op_ad_feedback": op_ad_fb})
+        return result
     if not approved and not fb_text:
         fb_text = "The reviewer rejected the proposal. Re-check it against the requirements."
 
     result.update({
         "approved"      : approved,
         "human_feedback": fb_text,
+        "op_ad_feedback": {},
     })
     return result
 
@@ -1562,22 +1580,42 @@ def op_ad_generate_node(state: DesignState) -> dict:
     ops = [op for op in (state.get("new_operations", []) or []) + (state.get("ad_only_ops") or [])
            if op.get("usecase", state["current_usecase"]) == state["current_usecase"]]
     if not ops:
-        return {"op_ads": {}}
-    op_ads, op_links, warnings = {}, {}, []
+        return {"op_ads": {}, "op_ad_feedback": {}}
+    feedback = state.get("op_ad_feedback") or {}
+    targeted = bool(feedback)
+    op_ads = dict(state.get("op_ads") or {}) if targeted else {}
+    op_links = dict(state.get("op_ad_links") or {}) if targeted else {}
+    replace = list(state.get("op_ads_replace") or [])
+    warnings = []
+    unknown = [n for n in feedback if n not in {o.get("name") for o in ops}]
+    for n in unknown:
+        warnings.append(f"Operation AD feedback for '{n}' ignored - no such operation in this review.")
     for op in ops:
         name = op.get("name", "")
+        if targeted and name not in feedback:
+            continue                       # keep the other diagrams as they are
         try:
-            print(f"[OpAD] Generating AD for: {name}")
-            mm, links = split_op_ad(llm_call(build_op_ad_prompt(op, state)))
+            prompt = build_op_ad_prompt(op, state)
+            if targeted:
+                prompt += (
+                    "\n\n# Reviewer Feedback on Your Previous Diagram\n"
+                    f"Previous diagram:\n{op_ads.get(name, '')}\n\n"
+                    f"Feedback:\n{feedback[name]}\n\n"
+                    "Revise the diagram to address the feedback (same syntax and traceability rules).\n")
+            print(f"[OpAD] {'Regenerating' if targeted else 'Generating'} AD for: {name}")
+            mm, links = split_op_ad(llm_call(prompt))
             op_ads[name] = clean_op_ad(mm)
             op_links[name] = links
+            if targeted and name not in replace:
+                replace.append(name)       # reviewer-driven diagram replaces an existing AD
         except Exception as e:
             warnings.append(f"Operation AD for {name} could not be generated: {e} - "
                             f"it will be generated again after Apply.")
     for w in warnings:
         print(f"[OpAD] WARNING: {w}")
-    return {"op_ads": op_ads, "op_ad_links": op_links,
-            "design_warnings": list(state.get("design_warnings") or []) + warnings}
+    return {"op_ads": op_ads, "op_ad_links": op_links, "op_ad_feedback": {},
+            "op_ads_replace": replace,
+            "design_warnings": list(dict.fromkeys(list(state.get("design_warnings") or []) + warnings))}
 
 
 # ── Fan-out: create Operation ADs in Rhapsody (after apply) ───────────────────
@@ -1701,6 +1739,8 @@ def route_after_ingest(state: DesignState) -> str:
 def route_after_review(state: DesignState) -> str:
     if state.get("approved"):
         return "apply_node"
+    if state.get("op_ad_feedback"):
+        return "op_ad_generate_node"        # regenerate only the commented Operation ADs
     return "design_elements_prompt_node"
 
 
@@ -1803,6 +1843,7 @@ def build_graph():
     # Review
     g.add_conditional_edges("human_review_node", route_after_review, {
         "apply_node"                 : "apply_node",
+        "op_ad_generate_node"        : "op_ad_generate_node",
         "design_elements_prompt_node": "design_elements_prompt_node",
     })
 
