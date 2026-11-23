@@ -74,6 +74,7 @@ class DesignState(TypedDict):
     known_interfaces : list        # interfaces that already exist in the component
     ibd_name         : str         # package-level IBD diagram name
     existing_ports   : dict        # {module: {port: {provided, required}}}
+    unexposed_ops    : list        # "module.op" public operations not offered by any interface
 
     # Shared LLM bus
     current_phase    : str         # which phase is using llm_node
@@ -196,6 +197,9 @@ Identify what new operations and interfaces are needed to implement the updated 
 # Module Classes of this Component (AB12Module)
 {modules}
 
+# Public Module Operations NOT Offered by Any Interface
+{unexposed_ops}
+
 Rules:
 - Reuse existing operations where possible — only add new ones if truly needed
 - New operation names: follow existing naming convention from BDD (rb_<componentPrefix>_<VerbNoun>)
@@ -205,6 +209,13 @@ Rules:
 - For each action in the AD, map it to an existing or new operation
 - New functionality: map each new action to exactly ONE module (1 action → 1 module)
 - Every new operation MUST name its owning module in "module" — one of the Module Classes above
+- A PUBLIC operation that this use case needs and that is called from outside its module
+  (another module, the SW component boundary, other components) MUST be offered by an
+  interface realized by its module. This applies to NEW operations and to EXISTING public
+  operations listed under "Public Module Operations NOT Offered by Any Interface" that are
+  used by this use case: propose a new interface (in "new_interfaces", with those
+  operations) or add them to a fitting existing interface, plus the realization.
+  Operations used only inside their own module stay private and need no interface
 - Interfaces are realized ONLY by a module class from the Module Classes list above:
   "realized_by" and every realizations "specific" MUST be one of those module names.
   NEVER use the use case name, the SW component, or an actor as realizer.
@@ -693,6 +704,22 @@ def _read_design_structure(project, dd_pkg, comp_pkg, bdds: list):
     return modules, stereotypes, intf_pkg, list(dict.fromkeys(intf_names))
 
 
+def _unexposed_public_ops(bdds: list, module_names: list) -> list:
+    """Public operations of the module classes that no interface on the BDDs offers."""
+    offered, public = set(), {}
+    for bdd in bdds:
+        for c in bdd.get("classes", []):
+            ops = c.get("operations", []) or []
+            if c["name"] in module_names and c.get("role") != "component":
+                for op in ops:
+                    if str(op.get("visibility", "public")).lower() == "public":
+                        public.setdefault(op["name"], c["name"])
+            elif c["name"].endswith(("Intf", "If")) or any(
+                    "interface" in st.lower() for st in c.get("stereotypes", []) or []):
+                offered |= {op["name"] for op in ops}
+    return [f"{mod}.{name}" for name, mod in public.items() if name not in offered]
+
+
 def read_context_node(state: DesignState) -> dict:
     print(f"[Context] Reading diagrams for: {state['current_usecase']}")
     try:
@@ -772,6 +799,8 @@ def read_context_node(state: DesignState) -> dict:
         # existing interface stereotype(s) and the package interfaces live in
         module_names, intf_stereotypes, intf_pkg, intf_names = _read_design_structure(
             p, dd_pkg, comp_pkg, bdds_dd + bdds_intf)
+        unexposed = _unexposed_public_ops(bdds_dd + bdds_intf, module_names)
+        print(f"[Context] Public module operations not in any interface: {len(unexposed)}")
         print(f"[Context] Modules: {module_names} | interface stereotypes: "
               f"{intf_stereotypes} | interface package: {intf_pkg or dd_pkg.name}")
         bdd_intf_str = bdd_mermaid(bdds_intf[0],
@@ -810,6 +839,7 @@ def read_context_node(state: DesignState) -> dict:
             "interface_stereotypes": intf_stereotypes,
             "interface_pkg"  : intf_pkg,
             "known_interfaces": list(dict.fromkeys(intf_names + unrealized.get("all_interfaces", []))),
+            "unexposed_ops"  : unexposed,
             "ibd_name"       : ibd_name,
             "existing_ports" : existing_ports,
         }
@@ -955,6 +985,8 @@ def design_elements_prompt_node(state: DesignState) -> dict:
         bdd_interfaces = state["bdd_interfaces"],
         modules        = "\n".join(f"- {m}" for m in state.get("module_names") or [])
                          or f"- {state['component_name']}  (module list could not be read)",
+        unexposed_ops  = "\n".join(f"- {o}" for o in (state.get("unexposed_ops") or [])[:40])
+                         or "(none — all public module operations are offered by an interface)",
     )
 
     # Re-run after the reviewer rejected the previous design (HITL #2)
