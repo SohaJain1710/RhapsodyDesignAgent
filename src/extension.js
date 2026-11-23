@@ -344,7 +344,8 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
             ports.forEach(p => {
                 stream.markdown(
                     '\n**Port: `' + p.name + '`**' +
-                    '\n- Module: `' + (p.module || comp) + '`' +
+                    (p.boundary ? '\n- Owner: SW component boundary `' + comp + '`'
+                                : '\n- Module: `' + (p.module || comp) + '`') +
                     ((p.provided||[]).length ? '\n- Provides: `' + p.provided.join(', ') + '`' : '') +
                     ((p.required||[]).length ? '\n- Requires: `' + p.required.join(', ') + '`' : '')
                 );
@@ -494,6 +495,7 @@ function openReviewWebview(context, data, comp, outputFile, stream, token) {
         known_interfaces: data.known_interfaces || [],
         warnings        : data.warnings || [],
         op_ads          : data.op_ads || {},
+        ad_only_ops     : data.ad_only_ops || [],
         ibd_delta       : data.ibd_delta || { ports: [], links: [] },
     });
 
@@ -733,7 +735,9 @@ let S = {
     new_interfaces : RAW.new_interfaces.map(i => ({ ...i, _sel: true })),
     ports          : ((RAW.ibd_delta||{}).ports||[]).map(p => ({ ...p, _sel: true })),
     links          : ((RAW.ibd_delta||{}).links||[]).map(l => ({ ...l, _sel: true })),
-    sel_op         : RAW.new_operations.length ? RAW.new_operations[0].name : null,
+    ad_only        : (RAW.ad_only_ops || []),   // existing ops that get an AD (implement an interface)
+    sel_op         : RAW.new_operations.length ? RAW.new_operations[0].name
+                   : ((RAW.ad_only_ops || [])[0] || {}).name || null,
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -856,7 +860,8 @@ function render() {
             cb.onchange = () => { S.ports[i]._sel = cb.checked; };
             item.appendChild(cb);
             const det = el('div', 'details');
-            det.appendChild(el('div', 'title', '<code>' + esc(port.name) + '</code>'));
+            det.appendChild(el('div', 'title', '<code>' + esc(port.name) + '</code>' +
+                (port.boundary ? '<span class="badge-new">BOUNDARY</span>' : '')));
             const fields = el('div', 'fields');
             fields.appendChild(field('Port Name', inp(port.name, v => {
                 const old = S.ports[i].name; S.ports[i].name = v;
@@ -865,8 +870,13 @@ function render() {
                 refreshConnectors();
             }, '160px')));
             if (MODULES.length) {
-                if (!MODULES.includes(port.module)) S.ports[i].module = MODULES[0];
-                fields.appendChild(field('Module', selEl(MODULES, S.ports[i].module, v => S.ports[i].module = v)));
+                const BOUNDARY = 'SW component boundary';
+                if (!port.boundary && !MODULES.includes(port.module)) S.ports[i].module = MODULES[0];
+                fields.appendChild(field('Owner', selEl(MODULES.concat([BOUNDARY]),
+                    port.boundary ? BOUNDARY : S.ports[i].module, v => {
+                        S.ports[i].boundary = (v === BOUNDARY);
+                        S.ports[i].module   = (v === BOUNDARY) ? comp : v;
+                    })));
             }
             fields.appendChild(field('Provides (comma separated)', inp((port.provided||[]).join(', '), v => S.ports[i].provided = csv(v), '220px')));
             fields.appendChild(field('Requires (comma separated)', inp((port.required||[]).join(', '), v => S.ports[i].required = csv(v), '220px')));
@@ -946,23 +956,28 @@ function render() {
     // ── Dynamic View panel ────────────────────────────────────────────────
     const dynamicPanel = el('div', 'tab-panel'); dynamicPanel.id = 'tab-dynamic';
     tabPanels['dynamic'] = dynamicPanel;
-    if (S.new_operations.length) {
+    const adOps = () => S.new_operations.concat(S.ad_only);
+    if (adOps().length) {
         const opSel = el('div', 'op-select');
         opSel.appendChild(el('label', '', 'Operation: '));
-        const opNames = S.new_operations.map(o => o.name);
+        const opNames = adOps().map(o => o.name);
         const opSelEl = selEl(opNames, S.sel_op || opNames[0], v => {
             S.sel_op = v;
             const ta = document.getElementById('dynamic-op-ta');
-            ta.value = S.op_ads[v] || defaultOpAD(S.new_operations.find(o => o.name === v));
+            ta.value = S.op_ads[v] || defaultOpAD(adOps().find(o => o.name === v));
             updateOpBadge();
             renderMermaid('dynamic-preview', ta.value);
+        });
+        // mark existing operations (AD only, operation already in the model)
+        Array.from(opSelEl.options).forEach(o => {
+            if (S.ad_only.some(a => a.name === o.value)) o.textContent = o.value + '  (existing operation)';
         });
         opSelEl.id = 'op-sel';
         opSel.appendChild(opSelEl);
         dynamicPanel.appendChild(opSel);
         dynamicPanel.appendChild(el('div', 'hint',
-            'Generated by the LLM for each new operation. Edit it here if needed - the shown diagram is created in Rhapsody on Apply.'));
-        const curOp = S.new_operations.find(o => o.name === S.sel_op) || S.new_operations[0];
+            'Generated by the LLM for each new operation and for existing operations that implement an interface but have no AD yet. Edit it here if needed - the shown diagram is created in Rhapsody on Apply.'));
+        const curOp = adOps().find(o => o.name === S.sel_op) || adOps()[0];
         mermaidEditor(dynamicPanel, 'Operation Activity Diagram', 'dynamic-op-ta', 'dynamic-preview',
             S.op_ads[S.sel_op] || defaultOpAD(curOp),
             v => { if (S.sel_op) { S.op_ads[S.sel_op] = v; S.op_ads_edited.add(S.sel_op); updateOpBadge(); } });

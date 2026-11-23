@@ -78,6 +78,7 @@ class DesignState(TypedDict):
     unexposed_ops    : list        # "module.op" public operations not offered by any interface
     module_members   : dict        # {module: {operations: [...], attributes: [...]}}
     interface_ops    : dict        # {existing interface: [operation dicts]}
+    ad_only_ops      : list        # existing module ops (implementing an interface) without AD
     op_ads_replace   : list        # op names whose AD the reviewer edited (replace existing AD)
 
     # Shared LLM bus
@@ -276,7 +277,9 @@ Propose the IBD changes (ports and connectors) needed for the interfaces of this
 {ibd}
 
 Rules:
-- Every port is owned by a MODULE class from the list above: set "module" to that class name
+- Every port is owned by a MODULE class from the list above: set "module" to that class name.
+  A port on the SW COMPONENT boundary instead gets "boundary": true (and no module) — the module
+  may have the same name as the component, so never put a boundary port under "module"
 - The module that REALIZES an interface PROVIDES it on one of its ports ("provided")
 - A module that USES an interface realized by another module REQUIRES it ("required")
 - Reuse an existing port when it fits (same port name, it will get the interface added);
@@ -298,6 +301,12 @@ Respond ONLY with valid JSON:
     {{
       "name": "rb_<moduleShortName>_<PortName>Prt",
       "module": "<module class from the list>",
+      "provided": ["rb_<moduleShortName>_<InterfaceName>Intf"],
+      "required": []
+    }},
+    {{
+      "name": "rb_<moduleShortName>_<PortName>Prt",
+      "boundary": true,
       "provided": ["rb_<moduleShortName>_<InterfaceName>Intf"],
       "required": []
     }}
@@ -669,6 +678,7 @@ def pick_usecase_node(state: DesignState) -> dict:
         "new_operations"   : [],
         "new_interfaces"   : [],
         "op_ads"           : {},
+        "ad_only_ops"      : [],
         "ad_feedback"      : "",
         "human_feedback"   : "",
         "approved"         : False,
@@ -877,6 +887,22 @@ def read_context_node(state: DesignState) -> dict:
         unexposed = _unexposed_public_ops(bdds_dd + bdds_intf, module_names)
         module_members = _module_members(bdds_dd + bdds_intf, module_names)
         interface_ops  = _interface_ops(bdds_dd + bdds_intf, module_names)
+        # which module operations already have an Operation AD
+        try:
+            from create_operation_ad import _existing_ads
+            from create_bdd import find_class_recursive as _fc
+            for m in module_names:
+                mcls = _fc(dd_pkg, m)
+                if mcls is None:
+                    continue
+                with_ad = []
+                for i in range(1, mcls.operations.Count + 1):
+                    o = mcls.operations.Item(i)
+                    if _existing_ads(o):
+                        with_ad.append(o.name)
+                module_members.setdefault(m, {"operations": [], "attributes": []})["ops_with_ad"] = with_ad
+        except Exception as e:
+            print(f"[Context] Could not read existing Operation ADs: {e}")
         print(f"[Context] Public module operations not in any interface: {len(unexposed)}")
         print(f"[Context] Modules: {module_names} | interface stereotypes: "
               f"{intf_stereotypes} | interface package: {intf_pkg or dd_pkg.name}")
@@ -1103,7 +1129,7 @@ def design_elements_parse_node(state: DesignState) -> dict:
                         state.get("module_members") or {},
                         state.get("interface_ops") or {})
     new_ops, new_intfs = v["new_operations"], v["new_interfaces"]
-    for op in new_ops:
+    for op in new_ops + v["ad_only_operations"]:
         op["usecase"] = state["current_usecase"]
     if extract_json.last_error:
         v["warnings"].insert(0, f"Design step: {extract_json.last_error} - nothing could be "
@@ -1120,6 +1146,7 @@ def design_elements_parse_node(state: DesignState) -> dict:
         "new_operations" : new_ops,
         "new_interfaces" : new_intfs,
         "design_warnings": v["warnings"],
+        "ad_only_ops"    : v["ad_only_operations"],
         "action_op_map"  : result.get("action_op_map", {}),
         "bdd_delta"      : {
             "classes"        : new_intfs,
@@ -1305,6 +1332,7 @@ def human_review_node(state: DesignState) -> dict:
         "known_interfaces": state.get("known_interfaces") or [],
         "warnings"      : state.get("design_warnings") or [],
         "op_ads"        : state.get("op_ads") or {},
+        "ad_only_ops"   : state.get("ad_only_ops") or [],
         "ibd_delta"     : state.get("ibd_delta", {}),
         "message"       : "Review the proposed design changes. Reply 'apply' to approve or provide feedback.",
     })
@@ -1335,6 +1363,7 @@ def human_review_node(state: DesignState) -> dict:
                 "op_ads"        : norm["op_ads"],
                 "op_ads_replace": [n for n in (edits.get("op_ads_edited") or [])
                                    if n in norm["op_ads"]],
+                "ad_only_ops"   : norm.get("ad_only_ops", []),
             })
             if norm.get("updated_ad"):
                 result["updated_ad"] = _clean_mermaid_flowchart(norm["updated_ad"])
@@ -1441,7 +1470,7 @@ def apply_node(state: DesignState) -> dict:
 def op_ad_generate_node(state: DesignState) -> dict:
     """Generate the Operation AD of every new operation so the reviewer sees
     (and can edit) the real diagrams in the review's Dynamic View."""
-    ops = [op for op in state.get("new_operations", []) or []
+    ops = [op for op in (state.get("new_operations", []) or []) + (state.get("ad_only_ops") or [])
            if op.get("usecase", state["current_usecase"]) == state["current_usecase"]]
     if not ops:
         return {"op_ads": {}}
@@ -1465,7 +1494,7 @@ def op_ad_generate_node(state: DesignState) -> dict:
 def fan_out_ad_node(state: DesignState):
     """Create the Operation AD of each new operation on its module's operation.
     Uses the AD shown/edited in the review; generates one only if missing."""
-    ops = [op for op in state.get("new_operations", []) or []
+    ops = [op for op in (state.get("new_operations", []) or []) + (state.get("ad_only_ops") or [])
            if op.get("usecase") == state["current_usecase"]]
     if not ops or not state.get("approved"):
         print("[FanOut] No ops to generate ADs for")
@@ -1498,7 +1527,8 @@ def fan_out_ad_node(state: DesignState):
         for err in res.get("errors", []) or ([res["error"]] if res.get("error") else []):
             errors.append(f"Operation AD {name}: {err}")
 
-    return {"operation_ads": results, "errors": errors, "op_ads": {}, "op_ads_replace": []}
+    return {"operation_ads": results, "errors": errors, "op_ads": {}, "op_ads_replace": [],
+            "ad_only_ops": []}
 
 
 def _with_flowchart_header(text: str) -> str:

@@ -274,8 +274,15 @@ def create_ibd(plan, rhapsody=None):
         if not isinstance(port_def, dict) or not port_def.get("name"):
             continue
         port_name = port_def["name"]
-        mod_name  = port_def.get("module") or component_name
-        mod_cls   = find_cls(dd_pkg, mod_name)
+        boundary  = bool(port_def.get("boundary"))
+        mod_name  = component_name if boundary else (port_def.get("module") or component_name)
+        if boundary:
+            mod_cls = comp_cls      # port on the SW component boundary
+            if mod_cls is None:
+                errors.append(f"Port {port_name}: SW component class not found - boundary port not created")
+                continue
+        else:
+            mod_cls = find_cls(dd_pkg, mod_name)
         if mod_cls is None:
             errors.append(f"Port {port_name}: module class '{mod_name}' not found - port not created")
             continue
@@ -308,7 +315,11 @@ def create_ibd(plan, rhapsody=None):
                 print(f"[IBD]   {msg}")
                 (results["interfaces_contracted"] if ok else errors).append(msg)
 
-        draw_port(port, mod_cls)
+        if boundary:
+            if ibd is not None:
+                draw_port(port, mod_cls, boxes=_ges(ibd, comp_cls))
+        else:
+            draw_port(port, mod_cls)
 
     # ── 2. Connectors ────────────────────────────────────────────────────────
     connector_st = None

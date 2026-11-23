@@ -217,10 +217,10 @@ def validate_design(new_ops: list, new_intfs: list, realizations: list,
             continue
         add(mod, general)
 
-    _mirror_interface_ops(ops, intfs, reals, module_members or {},
-                          interface_ops or {}, warnings)
+    ad_only = _mirror_interface_ops(ops, intfs, reals, module_members or {},
+                                    interface_ops or {}, warnings)
 
-    return {"new_operations": ops, "new_interfaces": intfs,
+    return {"new_operations": ops, "new_interfaces": intfs, "ad_only_operations": ad_only,
             "realizations": reals, "warnings": warnings}
 
 
@@ -230,18 +230,33 @@ def _existing_op_names(module_members: dict, module: str) -> set:
 
 
 def _mirror_interface_ops(ops: list, intfs: list, reals: list, module_members: dict,
-                          interface_ops: dict, warnings: list) -> None:
+                          interface_ops: dict, warnings: list) -> list:
     """Every operation of a realized interface must also exist on the realizing
     module (the implementation, where its Operation AD is drawn). Missing ones
-    are added to `ops` as new public operations of that module."""
+    are added to `ops` as new public operations of that module.
+    Returns the EXISTING module operations implementing an interface operation
+    that have no Operation AD yet (their AD still has to be drawn)."""
     intf_by_name = {i["name"]: i for i in intfs}
+    ad_only, ad_seen = [], set()
     for r in reals:
         mod, intf = r["specific"], r["general"]
         declared = (intf_by_name[intf].get("operations") if intf in intf_by_name
                     else normalize_operations(interface_ops.get(intf, [])))
         have = _existing_op_names(module_members, mod) | {o["name"] for o in ops if o.get("module") == mod}
         added = []
+        mm = module_members.get(mod) or {}
+        with_ad = set(mm.get("ops_with_ad", []) or [])
+        existing = _existing_op_names(module_members, mod)
         for iop in declared or []:
+            if iop["name"] in existing and iop["name"] not in with_ad \
+                    and (mod, iop["name"]) not in ad_seen \
+                    and not any(o["name"] == iop["name"] and o.get("module") == mod for o in ops):
+                ad_seen.add((mod, iop["name"]))
+                ad_only.append({**{k: v for k, v in iop.items() if k != "stereotypes"},
+                                "module": mod, "existing": True,
+                                "implements": f"{intf}.{iop['name']}",
+                                "rationale": f"Implements {intf}.{iop['name']} "
+                                             f"(existing operation of {mod} without Operation AD)"})
             if iop["name"] in have:
                 continue
             new = {k: v for k, v in iop.items() if k not in ("stereotypes",)}
@@ -254,6 +269,11 @@ def _mirror_interface_ops(ops: list, intfs: list, reals: list, module_members: d
         if added:
             warnings.append(f"Added {len(added)} operation(s) to {mod} to implement {intf}: "
                             f"{', '.join(added)}")
+    if ad_only:
+        warnings.append("Operation ADs will be drawn for existing operations that implement an "
+                        "interface but have none yet: "
+                        + ", ".join(f"{o['module']}.{o['name']}" for o in ad_only))
+    return ad_only
 
 
 def build_bdd_plans(component_name: str, new_ops: list, new_intfs: list,
@@ -369,6 +389,22 @@ def validate_ibd(ibd_delta, module_names: list, component_name: str,
             continue
 
         given = p.get("module") or p.get("owner") or ""
+        boundary = bool(p.get("boundary")) or (
+            _strip_alias(str(given)) == component_name and component_name not in module_names)
+        if boundary:
+            # port on the SW component boundary (not on a module)
+            p.update({"module": component_name, "boundary": True})
+            p.pop("owner", None)
+            key = (component_name + "#boundary", p["name"])
+            if key in index:
+                q = index[key]
+                q["provided"] = list(dict.fromkeys(q["provided"] + prov))
+                q["required"] = list(dict.fromkeys(q["required"] + req))
+            else:
+                index[key] = p
+                ports.append(p)
+            continue
+        p.pop("boundary", None)
         mod = resolve_module(given, module_names, component_name)
         if mod is None:
             mod = next((realizer[i] for i in prov if i in realizer
@@ -402,6 +438,35 @@ def validate_ibd(ibd_delta, module_names: list, component_name: str,
         ports.append(p)
 
     links, seen = [], set()
+    comp_like = ("", component_name)
+    for raw in delta.get("links", []) or []:
+        # Delegation written as "<component>.X -- its<Component>.Y" where the module
+        # has the component's name: X is meant as a SW component BOUNDARY port
+        l0 = normalize_link(raw)
+        if l0 is None:
+            continue
+        for c_obj, c_port, o_obj, o_port in ((l0["from_obj"], l0["from_port"], l0["to_obj"], l0["to_port"]),
+                                             (l0["to_obj"], l0["to_port"], l0["from_obj"], l0["from_port"])):
+            if c_obj in comp_like and o_obj not in comp_like \
+                    and o_obj.lower().endswith(component_name.lower()) and c_port != o_port:
+                q = index.get((component_name, c_port))
+                if q is not None and not q.get("boundary"):
+                    q["boundary"] = True
+                    del index[(component_name, c_port)]
+                    index[(component_name + "#boundary", c_port)] = q
+                    warnings.append(f"Port {c_port}: used as SW component boundary port "
+                                    f"(delegation to {o_obj}.{o_port}) - created on the component, "
+                                    f"not on module {component_name}.")
+    # two module ports providing the same interface are usually a mistake
+    prov_by = {}
+    for q in ports:
+        if q.get("boundary"):
+            continue
+        for i in q.get("provided", []):
+            prov_by.setdefault((q["module"], i), []).append(q["name"])
+    for (mod_, i), names in prov_by.items():
+        if len(names) > 1:
+            warnings.append(f"Ports {names} on {mod_} all provide {i} - one port is usually enough.")
     for raw in delta.get("links", []) or []:
         l = normalize_link(raw)
         if l is None:

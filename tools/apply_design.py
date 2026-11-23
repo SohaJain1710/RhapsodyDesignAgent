@@ -91,10 +91,11 @@ def normalize_edits(edits: dict, component_name: str, usecase: str = "",
     for w in v["warnings"]:
         print(f"[Edits] WARNING: {w}", file=sys.stderr)
     new_ops, new_intfs = v["new_operations"], v["new_interfaces"]
-    for op in new_ops:
+    ad_only = v.get("ad_only_operations", [])
+    for op in new_ops + ad_only:
         op.setdefault("usecase", usecase)
 
-    op_names = {o.get("name") for o in new_ops}
+    op_names = {o.get("name") for o in new_ops + ad_only}
     op_ads = {k: v_ for k, v_ in (edits.get("op_ads") or {}).items()
               if k in op_names and v_ and v_.strip()}
 
@@ -119,6 +120,7 @@ def normalize_edits(edits: dict, component_name: str, usecase: str = "",
         "ibd_delta"     : {"ports": iv["ports"], "links": iv["links"]},
         "op_ads"        : op_ads,
         "op_ads_replace": [n for n in (edits.get("op_ads_edited") or []) if n in op_ads],
+        "ad_only_ops"   : ad_only,
         "warnings"      : v["warnings"] + iv["warnings"],
         "ibd_name"      : edits.get("ibd_name") or "",
         "module_names"  : module_names,
@@ -190,7 +192,8 @@ def apply_design_state(state: dict, component_name: str) -> dict:
         from create_operation_ad import create_operation_ad
         op_ads_map = state.get("op_ads", {}) or {}
         replace    = set(state.get("op_ads_replace") or [])
-        missing = [op for op in new_ops if not (op_ads_map.get(op.get("name")) or "").strip()]
+        ad_targets = list(new_ops) + list(state.get("ad_only_ops") or [])
+        missing = [op for op in ad_targets if not (op_ads_map.get(op.get("name")) or "").strip()]
         relay_available = False
         if missing:
             try:
@@ -203,7 +206,7 @@ def apply_design_state(state: dict, component_name: str) -> dict:
                 errors.append(f"Operation ADs not generated for {[o.get('name') for o in missing]}: "
                               f"LLM relay not available")
         from design_graph_unified import build_op_ad_prompt, clean_op_ad
-        for op in new_ops:
+        for op in ad_targets:
             name = op.get("name", "")
             mermaid = op_ads_map.get(name) or ""
             try:
