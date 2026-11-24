@@ -156,9 +156,12 @@ function parseIntent(text, commandName) {
         return { intent: 'design_resume', component: compMatch ? compMatch[1] : '', fullText: text.trim() };
     }
 
-    // Detect requirement source selection (from button click query)
-    const sourceMatch = text.match(/\b(rhapsody|excel)\b/i);
+    // Requirement source selection — ONLY the query the source buttons send:
+    // "<component> rhapsody" or "<component> excel \"<file>\"". A normal message that
+    // merely contains the word "rhapsody"/"excel" must not start a new run.
     const excelPathMatch = text.match(/"([^"]+\.xlsx?)"/i) || text.match(/([A-Za-z]:[\\\/][^"\s]+\.xlsx?)/i);
+    const rest = text.replace(/\b(rb_\w+)\b/, '').replace(excelPathMatch ? excelPathMatch[0] : /$^/, '').trim();
+    const sourceMatch = rest.match(/^(rhapsody|excel)$/i);
     if (sourceMatch && (compMatch || excelPathMatch)) {
         const src = sourceMatch[1].toLowerCase();
         return {
@@ -204,7 +207,36 @@ function reviewEditsFile(component) {
     return path.join(RUNTIME_DIR, `_review_edits_${component}.json`);
 }
 
-function resumeFromWebview(component, resumeValue) {
+// What the paused run of a component is waiting for right now (null if none)
+function currentPause(component) {
+    try {
+        const o = JSON.parse(fs.readFileSync(outputFileFor(component, []), 'utf8'));
+        if (o.status === 'interrupted') {
+            const d = o.data || {};
+            return { usecase: d.usecase || '', phase: o.phase || d.phase || '' };
+        }
+    } catch {}
+    return null;
+}
+function phaseLabel(phase) {
+    return phase === 'ad_review' ? 'the Analysis AD review' : 'the design review';
+}
+// null when the button/review still matches the paused step, else a message
+function staleMessage(component, usecase, phase) {
+    const p = currentPause(component);
+    if (!p) return `No design run is paused for ${component} any more - this button/review is outdated.`;
+    if ((usecase && p.usecase !== usecase) || (phase && p.phase !== phase)) {
+        return `This button/review is outdated: the run for ${component} is now at ` +
+               `${phaseLabel(p.phase)} of "${p.usecase}". Use the latest review in chat.`;
+    }
+    return null;
+}
+
+function resumeFromWebview(component, resumeValue, expect) {
+    if (expect) {
+        const stale = staleMessage(component, expect.usecase, expect.phase);
+        if (stale) { vscode.window.showWarningMessage(stale); return Promise.resolve(false); }
+    }
     fs.writeFileSync(reviewEditsFile(component), JSON.stringify(resumeValue), 'utf8');
     return vscode.commands.executeCommand('workbench.action.chat.open', {
         query: '@rhapsody /design_resume ' + component + ' --from-review',
@@ -237,6 +269,20 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
         const resumeFile = path.join(RUNTIME_DIR, `_resume_${component}.json`);
         fs.writeFileSync(resumeFile, JSON.stringify(resumeValue), 'utf8');
         args.push('--resume-file', resumeFile);
+    }
+    if (resumeValue === undefined) {
+        const p = currentPause(component);
+        if (p) {
+            const choice = await vscode.window.showWarningMessage(
+                `A design run for ${component} is paused at ${phaseLabel(p.phase)} of "${p.usecase}". ` +
+                `Starting a new run discards it and designs ALL use cases with approved requirements again.`,
+                { modal: true }, 'Start New Run');
+            if (choice !== 'Start New Run') {
+                stream.markdown(`Kept the paused run (${phaseLabel(p.phase)} of "${p.usecase}"). ` +
+                                `Continue it with the buttons of the latest review.`);
+                return;
+            }
+        }
     }
     // A fresh run clears the old checkpoint for this component inside Python
     // (design_checkpoints.db is shared by all components, so it is not deleted here).
@@ -304,7 +350,7 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
                 '\n---\n**Choose an action:** approve the AD, or open the editor to correct it or ask the LLM to regenerate it with your feedback.' +
                 '\n\nYou can also reply `@rhapsody /design_resume ' + comp + ' <your feedback>` to regenerate, ' +
                 'or paste a corrected Mermaid `flowchart` after the component name to use it as-is.');
-            stream.button({ command: 'rhapsody.design.apply',    title: '✅ Approve AD & Continue', arguments: [comp] });
+            stream.button({ command: 'rhapsody.design.apply',    title: '✅ Approve AD & Continue', arguments: [comp, data.usecase || '', 'ad_review'] });
             stream.button({ command: 'rhapsody.design.reviewAd', title: '✏️ Edit AD / Give Feedback', arguments: [comp, outputFile] });
             return;
         }
@@ -411,7 +457,7 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
         }
 
         stream.markdown('\n---\n**Choose an action:**');
-        stream.button({ command: 'rhapsody.design.apply',  title: 'Apply & Draw',  arguments: [comp] });
+        stream.button({ command: 'rhapsody.design.apply',  title: 'Apply & Draw',  arguments: [comp, data.usecase || '', 'human_review'] });
         stream.button({ command: 'rhapsody.design.review', title: 'Review & Edit', arguments: [comp, outputFile] });
         return;
     }
@@ -551,15 +597,16 @@ function openReviewWebview(context, data, comp, outputFile, stream, token) {
     panel.webview.onDidReceiveMessage(async msg => {
         if (msg.command === 'apply') {
             panel.dispose();
-            await resumeFromWebview(comp, { approved: true, edits: msg.data });
+            await resumeFromWebview(comp, { approved: true, edits: msg.data }, { usecase: data.usecase, phase: 'human_review' });
         } else if (msg.command === 'feedback') {
             panel.dispose();
-            await resumeFromWebview(comp, { approved: false, feedback: msg.feedback || '' });
+            await resumeFromWebview(comp, { approved: false, feedback: msg.feedback || '' }, { usecase: data.usecase, phase: 'human_review' });
         } else if (msg.command === 'opad_feedback') {
             // regenerate only this Operation AD; keep the reviewer's other edits
             panel.dispose();
             await resumeFromWebview(comp, { approved: false, edits: msg.data,
-                                            op_ad_feedback: { [msg.op]: msg.feedback || '' } });
+                                            op_ad_feedback: { [msg.op]: msg.feedback || '' } },
+                                    { usecase: data.usecase, phase: 'human_review' });
         } else if (msg.command === 'cancel') {
             panel.dispose();
         }
@@ -588,10 +635,10 @@ function openAdReviewWebview(context, data, comp, requirements) {
             panel.dispose();
             await resumeFromWebview(comp, msg.edited
                 ? { approved: true, updated_ad: msg.updated_ad, req_map: msg.req_map }
-                : { approved: true });
+                : { approved: true }, { usecase: data.usecase, phase: 'ad_review' });
         } else if (msg.command === 'feedback') {
             panel.dispose();
-            await resumeFromWebview(comp, { approved: false, feedback: msg.feedback || '' });
+            await resumeFromWebview(comp, { approved: false, feedback: msg.feedback || '' }, { usecase: data.usecase, phase: 'ad_review' });
         } else if (msg.command === 'cancel') {
             panel.dispose();
         }
@@ -1432,7 +1479,10 @@ function activate(context) {
     );
     context.subscriptions.push(sourceCmd);
 
-    const applyCmd = vscode.commands.registerCommand('rhapsody.design.apply', async (component) => {
+    const applyCmd = vscode.commands.registerCommand('rhapsody.design.apply', async (component, usecase, phase) => {
+        // an old button in the chat history must not approve a different step
+        const stale = staleMessage(component, usecase, phase);
+        if (stale) { vscode.window.showWarningMessage(stale); return; }
         await vscode.commands.executeCommand('workbench.action.chat.open', { query: '@rhapsody /design_resume ' + component + ' apply' });
     });
     context.subscriptions.push(applyCmd);

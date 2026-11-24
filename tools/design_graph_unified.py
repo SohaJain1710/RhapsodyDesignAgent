@@ -423,22 +423,53 @@ def analysis_actions(updated_ad: str) -> list:
         return []
 
 
+_MERMAID_KEYWORDS = ("%%", "classdef", "class ", "style ", "linkstyle", "subgraph", "end",
+                     "direction", "click ")
+
+
+def _is_mermaid_line(t: str) -> bool:
+    import re as _r
+    low = t.lower()
+    if any(x in t for x in ("-->", "---", "-.->", "==>", "-.-")):
+        return True
+    if low.startswith(_MERMAID_KEYWORDS):
+        return True
+    # node declaration: id["..."], id(...), id{...}, id((..)), id([..]), id>..]
+    return bool(_r.match(r'^\w+\s*(\[|\(|\{|>)', t))
+
+
 def split_op_ad(text: str):
-    """LLM output → (mermaid flowchart, {design action id: [analysis action ids]})."""
-    lines = (text or "").splitlines()
-    idx = next((i for i, l in enumerate(lines)
-                if l.strip().lower().rstrip(":").startswith(_LINKS_HEADER)), None)
-    if idx is None:
-        return text or "", {}
-    links = {}
-    for l in lines[idx + 1:]:
-        if ":" not in l or l.strip().startswith("```"):
+    """LLM output → (mermaid flowchart, {design action id: [analysis action ids]}).
+
+    Robust against what LLMs add around the diagram: Markdown fences, prose
+    before/after, a bold / differently worded links header, or link lines
+    without any header. Only real Mermaid lines go into the diagram — any
+    leftover non-Mermaid line made the diagram invalid (blank in chat)."""
+    import re as _r
+    lines = [l for l in (text or "").splitlines() if not l.strip().startswith("```")]
+    start = next((i for i, l in enumerate(lines)
+                  if _r.match(r'^\s*(graph|flowchart)\b', l, _r.I)), None)
+    header = lines[start].strip() if start is not None else "graph TD"
+    diagram, links, in_links = [header], {}, False
+    for l in lines[(start + 1) if start is not None else 0:]:
+        t = l.strip().strip("*").strip()
+        if not t:
             continue
-        k, v = l.split(":", 1)
-        ids = [x.strip() for x in v.split(",") if x.strip()]
-        if k.strip() and ids:
-            links[k.strip()] = ids
-    return "\n".join(lines[:idx]), links
+        if _r.match(r'^[#*_\s]*(analysis\s+links|traceability|links?\s+to\s+analysis)', t, _r.I):
+            in_links = True
+            continue
+        m = _r.match(r'^[-*\s]*(\w+)\s*(?::|->|=>)\s*([\w\s,]+)$', t)
+        if m and not _is_mermaid_line(t.replace("->", "").replace("=>", "")):
+            ids = [x.strip() for x in m.group(2).split(",") if x.strip()]
+            if ids:
+                links[m.group(1)] = ids
+            continue
+        if in_links:
+            continue
+        if _is_mermaid_line(t):
+            diagram.append(l.rstrip())
+        # anything else is prose -> dropped
+    return "\n".join(diagram), links
 
 
 def resolve_action_links(mermaid: str, explicit: dict, op_name: str, state: dict):
@@ -1603,7 +1634,15 @@ def op_ad_generate_node(state: DesignState) -> dict:
                     f"Feedback:\n{feedback[name]}\n\n"
                     "Revise the diagram to address the feedback (same syntax and traceability rules).\n")
             print(f"[OpAD] {'Regenerating' if targeted else 'Generating'} AD for: {name}")
-            mm, links = split_op_ad(llm_call(prompt))
+            raw = llm_call(prompt)
+            try:
+                from debug_logger import DebugLogger
+                _log = DebugLogger(state["component_name"])
+                _log.llm_prompt(f"op_ad:{name}", prompt)
+                _log.llm_response(f"op_ad:{name}", raw)
+            except Exception:
+                pass
+            mm, links = split_op_ad(raw)
             op_ads[name] = clean_op_ad(mm)
             op_links[name] = links
             if targeted and name not in replace:
