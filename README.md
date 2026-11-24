@@ -7,13 +7,21 @@ A VS Code chat participant (`@rhapsody`) that generates Detailed Design artifact
 
 1. Download `rhapsody-design-assistant-win32-x64-<version>.vsix` from the repo's **Releases** page
    (or, for an untagged build, from **Actions → Build VSIX → a run → Artifacts**).
-2. In VS Code: **Extensions** view → `…` menu → **Install from VSIX…**, or run:
+2. Put the `.vsix` next to `install.bat` (or in a `dist` folder) and run **`install.bat`** — it
+   installs the newest VSIX into VS Code and removes folder copies from older setups.
+   Alternatively: **Extensions** view → `…` menu → **Install from VSIX…**, or run:
    ```
    code --install-extension rhapsody-design-assistant-win32-x64-0.0.3.vsix
    ```
 3. Reload the window. That's it: the VSIX contains its own Python 3.11 with every package
    pre-installed (LangGraph, LangChain, pywin32, openpyxl, …), so no Python install, pip,
    virtual environment or internet access is needed.
+
+### Developer setup (run from a repo checkout)
+
+`install.bat dev` runs `setup.ps1`: Python venv + pip, and an extension copy that uses this
+checkout's `tools/` folder — handy while changing the code. Install either the VSIX or the
+developer copy, not both (same extension identity; the installers remove the other one).
 
 ### Prerequisites
 

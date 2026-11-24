@@ -14,5 +14,6 @@ src/node_modules.zip
 config.json
 setup.ps1
 install.bat
+install_vsix.ps1
 INSTALLATION.md
 package-lock.json
