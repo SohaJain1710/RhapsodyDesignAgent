@@ -219,7 +219,9 @@ function currentPause(component) {
     return null;
 }
 function phaseLabel(phase) {
-    return phase === 'ad_review' ? 'the Analysis AD review' : 'the design review';
+    return phase === 'ad_review' ? 'the Analysis AD review'
+         : phase === 'usecase_select' ? 'the selection of already designed use cases'
+         : 'the design review';
 }
 // null when the button/review still matches the paused step, else a message
 function staleMessage(component, usecase, phase) {
@@ -330,6 +332,35 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
         }
         if (output.errors_so_far && output.errors_so_far.length) {
             stream.markdown(`\n**Errors so far:**\n${output.errors_so_far.map(e => `- ${String(e).split('\n')[0]}`).join('\n')}`);
+        }
+
+        // ── New run: some use cases were already designed by an earlier run ──
+        if (data.phase === 'usecase_select') {
+            const done = data.already_designed || [];
+            stream.markdown(`\n---\n## 🔁 Already Designed Use Cases — ${comp}`);
+            stream.markdown('\nThese use cases were applied by an earlier run. Choose whether to redesign them ' +
+                            '(the other use cases are designed as usual).\n');
+            let t = '\n| Use Case | Applied | Requirements since then |\n|---|---|---|\n';
+            done.forEach(d => {
+                const ch = [];
+                if ((d.new_reqs || []).length)     ch.push('new: ' + d.new_reqs.join(', '));
+                if ((d.changed_reqs || []).length) ch.push('changed: ' + d.changed_reqs.join(', '));
+                if ((d.removed_reqs || []).length) ch.push('removed: ' + d.removed_reqs.join(', '));
+                t += '| ' + d.usecase + ' | ' + (d.applied_at || '?') + (d.with_errors ? ' ⚠️ with errors' : '') +
+                     ' | ' + (ch.join('; ') || 'unchanged') + ' |\n';
+            });
+            stream.markdown(t);
+            stream.markdown('\nTo redesign only some, reply `@rhapsody /design_resume ' + comp +
+                            ' redesign <Use Case>; <Use Case>`.');
+            stream.button({ command: 'rhapsody.design.resumeWith', title: '⏭️ Skip Already Designed',
+                            arguments: [comp, 'usecase_select', { redesign: [] }] });
+            stream.button({ command: 'rhapsody.design.resumeWith', title: '🔁 Redesign All',
+                            arguments: [comp, 'usecase_select', { redesign: done.map(d => d.usecase) }] });
+            done.filter(d => (d.new_reqs || []).length || (d.changed_reqs || []).length).forEach(d => {
+                stream.button({ command: 'rhapsody.design.resumeWith', title: '🔁 Redesign changed: ' + d.usecase,
+                                arguments: [comp, 'usecase_select', { redesign: [d.usecase] }] });
+            });
+            return;
         }
 
         // ── HITL #1: Analysis AD review (after update_ad_parse, before design elements) ──
@@ -471,6 +502,9 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
     }
 
     stream.markdown(`\n---\n### ${output.success ? '✅' : '⚠️'} ${output.summary || 'Done.'}`);
+    if (output.skipped_usecases && output.skipped_usecases.length && output.applied_usecases && output.applied_usecases.length) {
+        stream.markdown(`\nSkipped (already designed): ${output.skipped_usecases.join(', ')}`);
+    }
     if (output.errors && output.errors.length) {
         stream.markdown(`\n**Errors:**\n${output.errors.map(e => `- ${e}`).join('\n')}`);
     }
@@ -1478,6 +1512,13 @@ function activate(context) {
         }
     );
     context.subscriptions.push(sourceCmd);
+
+    // Chat buttons that resume the paused run with a fixed answer (e.g. use case selection)
+    const resumeWithCmd = vscode.commands.registerCommand('rhapsody.design.resumeWith',
+        async (component, phase, value) => {
+            await resumeFromWebview(component, value, { usecase: '', phase });
+        });
+    context.subscriptions.push(resumeWithCmd);
 
     const applyCmd = vscode.commands.registerCommand('rhapsody.design.apply', async (component, usecase, phase) => {
         // an old button in the chat history must not approve a different step
