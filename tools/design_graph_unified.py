@@ -46,6 +46,7 @@ class DesignState(TypedDict):
     # Input
     component_name     : str
     requirement_source : str       # 'rhapsody' or 'excel'
+    srs_name           : str       # optional SRS package name(s), comma separated
     excel_path         : str       # path to Excel file (when source=excel)
     requirements       : list      # [{id, text, type, state, path}]
     use_cases          : list      # [{name, description, actors, requirements}]
@@ -616,7 +617,20 @@ def ingest_node(state: DesignState) -> dict:
 
         else:
             # Default: read from Rhapsody SRS package
-            requirements, srs_names = collect_all_requirements(project, component_name)
+            srs_given = (state.get("srs_name") or "").strip()
+            requirements, srs_names = collect_all_requirements(project, component_name,
+                                                               srs_names=srs_given or None)
+            if not srs_names:
+                from read_all_requirements import list_srs_packages
+                avail = list_srs_packages(project)
+                what = (f"SRS package '{srs_given}'" if srs_given
+                        else f"an SRS package matching {component_name}")
+                msg = (f"Could not find {what}. Available SRS packages: "
+                       f"{', '.join(avail) or '(none)'}. Start again with "
+                       f"/design {component_name} srs=<SRS package name>.")
+                print(f"[Ingest] ERROR: {msg}")
+                log.step("ingest", msg)
+                return {"errors": [msg], "requirements": [], "use_cases": use_cases}
             if srs_names:
                 print(f"[Ingest] Rhapsody requirements: {len(requirements)} from {srs_names}")
                 log.step("ingest", f"Requirements read from: {', '.join(srs_names)}")
@@ -1620,6 +1634,12 @@ def apply_node(state: DesignState) -> dict:
         return {}
     print(f"[Apply] Applying changes for: {state['current_usecase']}")
     errors = []
+    # requirement links (Analysis AD) must use the same SRS package(s) as ingest
+    try:
+        from read_all_requirements import set_srs_names
+        set_srs_names(state["component_name"], state.get("srs_name") or "")
+    except Exception:
+        pass
     try:
         import win32com.client
         from create_bdd import create_bdd_from_plan
@@ -2173,6 +2193,8 @@ if __name__ == "__main__":
     parser.add_argument("--component", required=True)
     parser.add_argument("--source",    default="rhapsody",
                         choices=["rhapsody", "excel"])
+    parser.add_argument("--srs",       default=None,
+                        help="SRS package name(s) (comma separated) when they differ from the component name")
     parser.add_argument("--excel",     default=None,
                         help="Path to Excel requirements file (used when --source=excel)")
     parser.add_argument("--output",    required=True)
@@ -2226,6 +2248,7 @@ if __name__ == "__main__":
             initial_state = {
                 "component_name"    : args.component,
                 "requirement_source": args.source,
+                "srs_name"          : args.srs or "",
                 "excel_path"        : args.excel or "",
             }
             _run_graph(initial_state, config, write_output, args.component, "Graph")

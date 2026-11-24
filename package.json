@@ -71,7 +71,7 @@
         "commands": [
           {
             "name": "design",
-            "description": "Generate design diagrams from requirements"
+            "description": "Generate design for a component: /design <component> [srs=<SRS package name>]"
           },
           {
             "name": "design_resume",

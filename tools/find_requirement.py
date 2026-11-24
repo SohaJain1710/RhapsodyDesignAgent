@@ -53,11 +53,12 @@ _req_index_cache: dict = {}
 def _requirement_index(project, component_name):
     """{requirement name: element} over ALL SRS packages of the component
     (every requirements package, every matching SRS sub-package), built once."""
-    from read_all_requirements import find_srs_packages
+    from read_all_requirements import find_srs_packages, _SRS_OVERRIDE
+    override = tuple(_SRS_OVERRIDE.get(component_name, []))
     try:
-        key = (str(project.GUID), component_name)
+        key = (str(project.GUID), component_name, override)
     except Exception:
-        key = (id(project), component_name)
+        key = (id(project), component_name, override)
     if key in _req_index_cache:
         return _req_index_cache[key]
     index = {}

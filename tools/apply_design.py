@@ -135,6 +135,11 @@ def apply_design_state(state: dict, component_name: str) -> dict:
     errors = []
     op_ads = []
     print(f"[ApplyDirect] Applying for: {component_name}", file=sys.stderr)
+    try:
+        from read_all_requirements import set_srs_names
+        set_srs_names(component_name, state.get("srs_name") or "")
+    except Exception:
+        pass
 
     try:
         import win32com.client

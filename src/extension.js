@@ -144,7 +144,19 @@ function runPython(scriptPath, args) {
 }
 
 // ── Intent parsing — /design and /design_bp only ────────────────────────
-function parseIntent(text, commandName) {
+// Optional SRS package name: srs=NAME | srs:NAME | --srs NAME | srs="NAME WITH SPACES"
+// (several names comma separated). Returns { srs, text without the option }.
+function extractSrs(text) {
+    const m = text.match(/(?:^|\s)(?:srs\s*[=:]\s*|--srs\s+|srs\s+(?=["']?SRS))(?:"([^"]+)"|([^\s"]+))/i);
+    if (!m) return { srs: '', text };
+    return { srs: (m[1] || m[2] || '').trim(), text: (text.slice(0, m.index) + ' ' + text.slice(m.index + m[0].length)).trim() };
+}
+function srsQueryPart(srs) {
+    return srs ? ` srs="${srs}"` : '';
+}
+
+function parseIntent(rawText, commandName) {
+    const { srs, text } = (commandName === 'design_resume') ? { srs: '', text: rawText } : extractSrs(rawText);
     const compMatch = text.match(/\b(rb_\w+)\b/);
     const reqMatches = text.match(/\bSRS_\w+_\d+\b/g) || [];
 
@@ -169,6 +181,7 @@ function parseIntent(text, commandName) {
             source    : src,
             excelPath : excelPathMatch ? excelPathMatch[1] : null,
             component : compMatch ? compMatch[1] : '',
+            srs       : srs,
             fullText  : text.trim(),
         };
     }
@@ -177,6 +190,7 @@ function parseIntent(text, commandName) {
         intent: 'design',
         component: compMatch ? compMatch[1] : '',
         requirementIds: reqMatches,
+        srs: srs,
         fullText: text.trim(),
     };
 }
@@ -263,6 +277,9 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
     const args = ['--component', component, '--source', source, '--output', outputFile];
     if (source === 'excel' && requirementTexts && requirementTexts.excelPath) {
         args.push('--excel', requirementTexts.excelPath);
+    }
+    if (requirementTexts && requirementTexts.srsName) {
+        args.push('--srs', requirementTexts.srsName);
     }
 
     if (resumeValue !== undefined) {
@@ -512,24 +529,28 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
 
 
 // ── Ask requirement source via VS Code chat buttons ──────────────────────
-async function askRequirementSource(stream, component, promptText) {
-    // Check if user already specified in prompt — skip UI
-    if (/excel/i.test(promptText))    return 'excel';
-    if (/rhapsody/i.test(promptText)) return 'rhapsody';
+async function askRequirementSource(stream, component, promptText, srs) {
+    // Check if user already specified in prompt — skip UI (SRS option removed first)
+    const plain = extractSrs(promptText).text;
+    if (/\bexcel\b/i.test(plain))    return 'excel';
+    if (/\brhapsody\b/i.test(plain)) return 'rhapsody';
 
     // Show VS Code chat button UI
-    stream.markdown(`### 📋 Requirements Source for **${component}**\n\nWhere should I load requirements from?`);
+    stream.markdown(`### 📋 Requirements Source for **${component}**\n\nWhere should I load requirements from?` +
+        (srs ? `\n\nSRS package: \`${srs}\`` :
+               `\n\n_Tip: if the SRS package name differs from the component name, add ` +
+               `\`srs=<SRS package>\`, e.g. \`@rhapsody /design ${component} srs=SRS_XYZ\`._`));
 
     stream.button({
         command: 'rhapsody.design.source',
-        title: '$(database) From Rhapsody SRS',
-        arguments: [component, 'rhapsody'],
+        title: '$(database) From Rhapsody SRS' + (srs ? ` (${srs})` : ''),
+        arguments: [component, 'rhapsody', srs || ''],
     });
 
     stream.button({
         command: 'rhapsody.design.source',
         title: '$(table) From Excel File',
-        arguments: [component, 'excel'],
+        arguments: [component, 'excel', ''],
     });
 
     return null;  // Wait for button click — handled via command registration
@@ -1372,21 +1393,24 @@ async function handleRhapsodyChat(request, context, stream, token) {
     if (intent.intent === 'design_source') {
         const label = intent.source === 'excel'
             ? `Excel: \`${intent.excelPath || 'unknown'}\``
-            : 'Rhapsody SRS';
+            : (intent.srs ? `Rhapsody SRS package \`${intent.srs}\`` : 'Rhapsody SRS');
         stream.markdown(`Loading requirements from **${label}**...`);
         await runUnifiedGraph(
             intent.component, [],
-            { requirementSource: intent.source, excelPath: intent.excelPath },
+            { requirementSource: intent.source, excelPath: intent.excelPath,
+              srsName: intent.source === 'excel' ? '' : intent.srs },
             undefined, stream, token
         );
         return;
     }
 
     // Ask user where requirements come from
-    const source = await askRequirementSource(stream, intent.component, request.prompt);
+    const source = await askRequirementSource(stream, intent.component, request.prompt, intent.srs);
     if (!source) return;  // user cancelled or unclear
 
-    await runUnifiedGraph(intent.component, [], { requirementSource: source }, undefined, stream, token);
+    await runUnifiedGraph(intent.component, [],
+        { requirementSource: source, srsName: source === 'excel' ? '' : intent.srs },
+        undefined, stream, token);
 }
 
 // ── Python environment setup ─────────────────────────────────────────────
@@ -1490,8 +1514,8 @@ function activate(context) {
     // Register button command for requirement source selection
     const sourceCmd = vscode.commands.registerCommand(
         'rhapsody.design.source',
-        async (component, source) => {
-            let query = `@rhapsody /design ${component} ${source}`;
+        async (component, source, srs) => {
+            let query = `@rhapsody /design ${component} ${source}` + srsQueryPart(srs);
 
             if (source === 'excel') {
                 // Show native file picker for Excel file

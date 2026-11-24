@@ -176,12 +176,70 @@ def _component_short_name(component_name: str) -> str:
     return parts[2] if len(parts) >= 3 else (parts[-1] if parts else component_name)
 
 
-def find_srs_packages(project, component_name):
+# Explicit SRS package name(s) per component (set when the user gives "srs=...")
+_SRS_OVERRIDE: dict = {}
+
+
+def _norm_srs_names(srs_names) -> list:
+    if not srs_names:
+        return []
+    if isinstance(srs_names, str):
+        srs_names = srs_names.split(",")
+    # accept full paths like "AB12Requirements::SRS::SRS_SDM_X"
+    return [str(n).strip().strip('"').split("::")[-1].strip() for n in srs_names if str(n).strip()]
+
+
+def set_srs_names(component_name: str, srs_names) -> None:
+    """Remember explicit SRS package names for a component (used by every lookup
+    in this process, e.g. requirement links of AD actions)."""
+    names = _norm_srs_names(srs_names)
+    if names:
+        _SRS_OVERRIDE[component_name] = names
+    else:
+        _SRS_OVERRIDE.pop(component_name, None)
+
+
+def _srs_roots(project):
+    """[(top package, SRS package)] for every top-level package with an 'SRS' package."""
+    roots = []
+    try:
+        tops = [project.packages.Item(i) for i in range(1, project.packages.Count + 1)]
+    except Exception as e:
+        print(f"[ReadAllReq] Cannot search packages: {e}", file=sys.stderr)
+        return roots
+    for top in tops:
+        try:
+            for j in range(1, top.packages.Count + 1):
+                if top.packages.Item(j).name == "SRS":
+                    roots.append((top, top.packages.Item(j)))
+        except Exception:
+            pass
+    return roots
+
+
+def list_srs_packages(project) -> list:
+    """Names of all SRS sub-packages (for error messages)."""
+    names = []
+    for top, srs in _srs_roots(project):
+        try:
+            names += [f"{top.name}::SRS::{srs.packages.Item(k).name}"
+                      for k in range(1, srs.packages.Count + 1)]
+        except Exception:
+            pass
+    return names
+
+
+def find_srs_packages(project, component_name, srs_names=None):
     """ALL SRS sub-packages of a component, in EVERY top-level package that has
     an 'SRS' package (AB12Requirements, AB12Requirements_v2, CustRequirements, ...).
 
-    Returns [(package, "Top::SRS::Sub"), ...] — previously only the first
-    requirements package and the first matching sub-package were searched."""
+    srs_names : explicit SRS package name(s) (when they differ from the component
+                name) — exact name match first (case-insensitive), else "contains".
+                Defaults to the names set with set_srs_names() for the component.
+    Returns [(package, "Top::SRS::Sub"), ...]."""
+    wanted = _norm_srs_names(srs_names) or _SRS_OVERRIDE.get(component_name, [])
+    if wanted:
+        return _find_named_srs(project, wanted)
     short = _component_short_name(component_name).lower()
     found, seen = [], set()
     try:
@@ -212,11 +270,33 @@ def find_srs_packages(project, component_name):
                 seen.add(key)
                 found.append((sub, f"{top.name}::SRS::{sub.name}"))
     if not found:
-        print(f"[ReadAllReq] No SRS sub-package matching '{short}' in any requirements package",
-              file=sys.stderr)
+        print(f"[ReadAllReq] No SRS sub-package matching '{short}' in any requirements package. "
+              f"Available: {list_srs_packages(project)}", file=sys.stderr)
     else:
         print(f"[ReadAllReq] SRS packages for {component_name}: {[l for _, l in found]}",
               file=sys.stderr)
+    return found
+
+
+def _find_named_srs(project, wanted: list) -> list:
+    subs = []
+    for top, srs in _srs_roots(project):
+        try:
+            subs += [(srs.packages.Item(k), f"{top.name}::SRS::{srs.packages.Item(k).name}")
+                     for k in range(1, srs.packages.Count + 1)]
+        except Exception:
+            pass
+    found, seen = [], set()
+    for name in wanted:
+        exact = [x for x in subs if x[0].name.lower() == name.lower()]
+        hits = exact or [x for x in subs if name.lower() in x[0].name.lower()]
+        if not hits:
+            print(f"[ReadAllReq] SRS package '{name}' not found", file=sys.stderr)
+        for pkg, label in hits:
+            if label not in seen:
+                seen.add(label)
+                found.append((pkg, label))
+    print(f"[ReadAllReq] SRS packages (given {wanted}): {[l for _, l in found]}", file=sys.stderr)
     return found
 
 
@@ -226,10 +306,10 @@ def find_srs_package(project, component_name):
     return (pkgs[0][0], pkgs[0][1]) if pkgs else (None, None)
 
 
-def collect_all_requirements(project, component_name, filter_state=None):
-    """Requirements from ALL SRS packages of the component, de-duplicated.
-    Returns (requirements, [package labels])."""
-    pkgs = find_srs_packages(project, component_name)
+def collect_all_requirements(project, component_name, filter_state=None, srs_names=None):
+    """Requirements from ALL SRS packages of the component (or of the given SRS
+    package names), de-duplicated. Returns (requirements, [package labels])."""
+    pkgs = find_srs_packages(project, component_name, srs_names)
     reqs, by_guid, by_id = [], set(), {}
     for pkg, label in pkgs:
         part = []
@@ -256,12 +336,14 @@ if __name__ == "__main__":
                         help="Filter by state value (e.g. 'approved'). "
                              "Omit to return all requirements.")
     parser.add_argument("--output", default=None)
+    parser.add_argument("--srs", default=None,
+                        help="SRS package name(s) when they differ from the component name")
     args = parser.parse_args()
 
     _, project = get_rhapsody()
 
     requirements, srs_names = collect_all_requirements(project, args.component,
-                                                       filter_state=args.state)
+                                                       filter_state=args.state, srs_names=args.srs)
     srs_pkg_name = ", ".join(srs_names)
     if not srs_names:
         print(json.dumps({
