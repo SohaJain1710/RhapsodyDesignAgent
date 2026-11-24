@@ -158,7 +158,7 @@ def create_ibd(plan, rhapsody=None):
 
     errors, notes = [], []
     results = {"ports_created": [], "ports_drawn": [], "interfaces_contracted": [],
-               "links_created": []}
+               "links_created": [], "contracts_added": []}
 
     def done():
         results["errors"], results["notes"] = errors, notes
@@ -288,6 +288,7 @@ def create_ibd(plan, rhapsody=None):
             continue
 
         port = find_port(mod_cls, port_name)
+        new_port = port is None
         if port is None:
             try:
                 port = mod_cls.addNewAggr("Port", port_name)
@@ -314,6 +315,10 @@ def create_ibd(plan, rhapsody=None):
                 ok, msg = contract_interface(port, iface, kind)
                 print(f"[IBD]   {msg}")
                 (results["interfaces_contracted"] if ok else errors).append(msg)
+                if ok and msg.startswith("Contracted"):
+                    results["contracts_added"].append({
+                        "port": f"{mod_cls.name}.{port_name}" + (" (boundary)" if boundary else ""),
+                        "interface": iface_name, "kind": kind, "new_port": new_port})
 
         if boundary:
             if ibd is not None:

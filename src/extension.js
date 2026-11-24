@@ -204,6 +204,14 @@ function outputFileFor(component, requirementIds) {
     return path.join(RUNTIME_DIR, `_design_output_${component}_${key}.json`);
 }
 
+function renderChangeSummary(stream, output) {
+    if (!output.change_summary_md) return;
+    stream.markdown('\n' + output.change_summary_md + '\n');
+    if (output.change_summary_file) {
+        stream.markdown(`\n_Summary saved to \`${output.change_summary_file}\`_\n`);
+    }
+}
+
 function renderRequirementsTable(stream, output) {
     const reqs = output.requirements_considered || [];
     if (!reqs.length) return;
@@ -346,6 +354,7 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
         // Report what this run already wrote to Rhapsody before pausing again
         if (output.applied_usecases && output.applied_usecases.length) {
             stream.markdown(`\n✅ **Applied to Rhapsody:** ${output.applied_usecases.join(', ')}`);
+            renderChangeSummary(stream, output);
         }
         if (output.errors_so_far && output.errors_so_far.length) {
             stream.markdown(`\n**Errors so far:**\n${output.errors_so_far.map(e => `- ${String(e).split('\n')[0]}`).join('\n')}`);
@@ -519,6 +528,7 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
     }
 
     stream.markdown(`\n---\n### ${output.success ? '✅' : '⚠️'} ${output.summary || 'Done.'}`);
+    renderChangeSummary(stream, output);
     if (output.skipped_usecases && output.skipped_usecases.length && output.applied_usecases && output.applied_usecases.length) {
         stream.markdown(`\nSkipped (already designed): ${output.skipped_usecases.join(', ')}`);
     }

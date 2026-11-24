@@ -438,8 +438,11 @@ def update_bdd(dd_pkg, bdd_name: str, new_elements: list,
     return {"success": len(errors) == 0, "diagram_name": bdd_name, "errors": errors}
 
 
-def _add_members(cls, cls_def, errors):
-    """Add operations / attributes that do not exist yet; report every failure."""
+def _add_members(cls, cls_def, errors, added=None):
+    """Add operations / attributes that do not exist yet; report every failure.
+    `added` (optional dict) collects what was really created / already there."""
+    if added is None:
+        added = {}
     cname = cls_def.get("name", "")
     try:
         existing_ops = {cls.operations.Item(i).name for i in range(1, cls.operations.Count + 1)}
@@ -447,7 +450,10 @@ def _add_members(cls, cls_def, errors):
         existing_ops = set()
     for op_def in cls_def.get("operations", []):
         op_name = op_def.get("name", "")
-        if not op_name or op_name in existing_ops:
+        if not op_name:
+            continue
+        if op_name in existing_ops:
+            added.setdefault("existing_operations", []).append(f"{cname}.{op_name}")
             continue
         try:
             op = win32com.client.Dispatch(cls.addNewAggr("Operation", op_name))
@@ -455,6 +461,7 @@ def _add_members(cls, cls_def, errors):
             errors.append(f"{cname}.{op_name}: could not create operation: {e}")
             continue
         existing_ops.add(op_name)
+        added.setdefault("operations", []).append(f"{cname}.{op_name}")
         try: op.setReturnTypeDeclaration(op_def.get("return_type", "void") or "void")
         except Exception as e: errors.append(f"{cname}.{op_name}: return type: {e}")
         if op_def.get("visibility"):
@@ -481,6 +488,7 @@ def _add_members(cls, cls_def, errors):
         try:
             attr = win32com.client.Dispatch(cls.addNewAggr("Attribute", attr_name))
             existing_attrs.add(attr_name)
+            added.setdefault("attributes", []).append(f"{cname}.{attr_name}")
             if attr_def.get("type"):
                 attr.setTypeDeclaration(attr_def["type"])
         except Exception as e:
@@ -522,6 +530,7 @@ def create_bdd_from_plan(plan: dict, rhapsody=None, diagram_name: str = None) ->
             print(f"[BDD] Interface package '{plan['interface_pkg']}' not found — using {dd_pkg.name}")
 
     create_missing = plan.get("create_missing", True)
+    changes = {}          # what this call really created (for the change summary)
     fallback_sts   = plan.get("interface_stereotypes") or []
     elements = []
 
@@ -539,6 +548,7 @@ def create_bdd_from_plan(plan: dict, rhapsody=None, diagram_name: str = None) ->
                 continue
             try:
                 cls = new_cls_pkg.addNewAggr("Class", name)
+                changes.setdefault("classes", []).append(name)
                 print(f"[BDD] Created class: {name} in {new_cls_pkg.name}")
                 try: cls.addNewAggr("Tag", "LLMGenerated")   # for confirm_changes.py
                 except Exception: pass
@@ -555,7 +565,7 @@ def create_bdd_from_plan(plan: dict, rhapsody=None, diagram_name: str = None) ->
             except Exception as e:
                 errors.append(f"Class {name}: could not create: {e}")
                 continue
-        _add_members(cls, cls_def, errors)
+        _add_members(cls, cls_def, errors, changes)
         elements.append({"type": "class_obj", "cls": cls, "name": name, "w": 172, "h": 139})
 
     for kind in ("realizations", "generalizations"):
@@ -580,12 +590,20 @@ def create_bdd_from_plan(plan: dict, rhapsody=None, diagram_name: str = None) ->
                 if obj is not None and not any(e.get("cls") is obj for e in elements):
                     elements.append({"type": "class_obj", "cls": obj, "name": nm, "w": 172, "h": 139})
             elements.append({"type": etype, "from": specific, "to": general,
-                             "from_cls": from_cls, "to_cls": to_cls})
+                             "from_cls": from_cls, "to_cls": to_cls,
+                             "pre_exists": _find_generalization(from_cls, to_cls, general) is not None})
 
     bdd_name = diagram_name or f"{component_name}_BDD"
     res = update_bdd(dd_pkg, bdd_name, elements, rhapsody, project)
+    for e in elements:
+        if e.get("type") in ("realization", "generalization") and not e.get("pre_exists") \
+                and e.get("from_cls") is not None \
+                and _find_generalization(e["from_cls"], e.get("to_cls"), e["to"]) is not None:
+            arrow = "..|>" if e["type"] == "realization" else "--|>"
+            changes.setdefault("relations", []).append(f"{e['from']} {arrow} {e['to']}")
     res["errors"] = errors + (res.get("errors") or [])
     res["success"] = len(res["errors"]) == 0
+    res["changes"] = changes
     return res
 
 

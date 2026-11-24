@@ -83,6 +83,8 @@ class DesignState(TypedDict):
     op_ad_links      : dict        # {op: {design action id: [analysis action ids]}} from the LLM
     op_ad_feedback   : dict        # {op: reviewer feedback} → regenerate only these Operation ADs
     skipped_usecases : list        # already designed use cases the user chose not to redesign
+    context_req_map  : dict        # requirement links of the Analysis AD BEFORE this run
+    change_log       : Annotated[list, operator.add]   # what each apply really changed
     op_ads_replace   : list        # op names whose AD the reviewer edited (replace existing AD)
 
     # Shared LLM bus
@@ -404,6 +406,101 @@ action_2: action_crc
 
 
 _LINKS_HEADER = "analysis links per action"
+
+
+def _flowchart_only(ad_text: str) -> str:
+    """Mermaid flowchart part of an AD context string (no header / metadata)."""
+    t = ad_text or ""
+    for kw in ("flowchart TD", "flowchart LR", "graph TD", "graph LR"):
+        if kw in t:
+            t = t[t.index(kw):]
+            break
+    for marker in ("Requirements linked per action:", "Rules:"):
+        if marker in t:
+            t = t[:t.index(marker)]
+    return t.strip()
+
+
+def diff_analysis_ad(old_ad: str, new_ad: str, old_map: dict, new_map: dict) -> dict:
+    """Added / removed / modified actions and requirement links of the Analysis AD."""
+    old = analysis_actions(_flowchart_only(old_ad)) if old_ad and "No existing AD" not in old_ad else []
+    new = analysis_actions(new_ad or "")
+    norm = lambda t: " ".join(str(t).lower().split())
+    old_by_text = {norm(t): (i, t) for i, t in old}
+    new_by_text = {norm(t): (i, t) for i, t in new}
+    unchanged = set(old_by_text) & set(new_by_text)
+    old_left = {i: t for i, t in old if norm(t) not in unchanged}
+    new_left = {i: t for i, t in new if norm(t) not in unchanged}
+    modified = [{"id": i, "old": old_left[i], "new": new_left[i]} for i in list(new_left) if i in old_left]
+    for m in modified:
+        old_left.pop(m["id"], None); new_left.pop(m["id"], None)
+    text_of = {**dict(old), **dict(new)}
+    old_pairs = {(a, r) for a, rs in (old_map or {}).items() for r in rs}
+    new_ids = {i for i, _ in new}
+    new_pairs = {(a, r) for a, rs in (new_map or {}).items() for r in rs if a in new_ids}
+    label = lambda a: text_of.get(a, a)
+    return {
+        "actions_added"   : list(new_left.values()),
+        "actions_removed" : list(old_left.values()),
+        "actions_modified": modified,
+        "links_added"     : sorted(f"{label(a)} -> {r}" for a, r in new_pairs - old_pairs),
+        "links_removed"   : sorted(f"{label(a)} -> {r}" for a, r in old_pairs - new_pairs),
+        "new_diagram"     : not (old_ad or "").strip() or "No existing AD" in (old_ad or ""),
+    }
+
+
+def render_change_summary(component: str, summary: dict) -> str:
+    """Markdown summary per use case: Added / Modified / Removed / Unchanged."""
+    out = []
+    for uc, ch in summary.items():
+        ad, bdd, ibd, opads = (ch.get("analysis_ad") or {}, ch.get("bdd") or {},
+                               ch.get("ibd") or {}, ch.get("op_ads") or [])
+        added, modified, removed, kept = [], [], [], []
+        if ad.get("new_diagram"):
+            added.append("Analysis AD (new diagram)")
+        added += [f"Analysis AD action: {t}" for t in ad.get("actions_added", [])]
+        added += [f"Requirement link: {l}" for l in ad.get("links_added", [])]
+        added += [f"Interface: {c}" for c in bdd.get("classes", [])]
+        added += [f"Operation: {o}" for o in bdd.get("operations", [])]
+        added += [f"Attribute: {o}" for o in bdd.get("attributes", [])]
+        added += [f"Realization: {r}" for r in bdd.get("relations", [])]
+        added += [f"Port: {p}" for p in ibd.get("ports_created", [])]
+        added += [f"Connector: {c}" for c in ibd.get("links_created", [])]
+        new_ports = set(p.replace(" (boundary)", "") for p in ibd.get("ports_created", []))
+        for c in ibd.get("contracts_added", []):
+            if c.get("new_port") or c["port"].replace(" (boundary)", "") in new_ports:
+                continue
+            modified.append(f"Port {c['port']}: {c['kind']} interface {c['interface']} added")
+        modified += [f"Analysis AD action: \"{m['old']}\" -> \"{m['new']}\"" for m in ad.get("actions_modified", [])]
+        for o in opads:
+            r = o.get("result") or {}
+            name = o.get("operation", "")
+            if r.get("skipped"):
+                kept.append(f"Operation AD {name}AD (already existed, kept)")
+            elif r.get("replaced"):
+                modified.append(f"Operation AD {name}AD replaced ({r.get('traces', 0)} trace links)")
+                removed.append(f"Previous Operation AD of {name}")
+            elif r.get("success") or r.get("diagram"):
+                added.append(f"Operation AD {name}AD ({r.get('traces', 0)} trace links to the Analysis AD)")
+        removed += [f"Analysis AD action: {t}" for t in ad.get("actions_removed", [])]
+        removed += [f"Requirement link: {l}" for l in ad.get("links_removed", [])]
+        kept += [f"Operation already existed: {o}" for o in bdd.get("existing_operations", [])]
+        out.append(f"### Change summary - {uc}")
+        for title, items in (("Added", added), ("Modified", modified), ("Removed", removed),
+                             ("Unchanged / kept", kept)):
+            out.append(f"**{title} ({len(items)})**")
+            out += [f"- {x}" for x in items] or ["- (none)"]
+        out.append("")
+    return "\n".join(out).strip()
+
+
+def write_change_summary_file(component: str, summary: dict) -> str:
+    import datetime
+    path = os.path.join(RUNTIME_DIR, f"_design_summary_{component}_"
+                        f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"# Design summary - {component}\n\n" + render_change_summary(component, summary) + "\n")
+    return path
 
 
 def _clean_label(text: str) -> str:
@@ -1151,6 +1248,7 @@ def read_context_node(state: DesignState) -> dict:
         return {
             "existing_ad"    : ad_str,
             "existing_req_map": existing_req_map,
+            "context_req_map": dict(existing_req_map),
             "bdd_dd"         : bdd_dd_str,
             "bdd_interfaces" : bdd_intf_str,
             "bdd_dd_name"    : bdd_dd_name or "DetailedDesignBDD",
@@ -1634,6 +1732,7 @@ def apply_node(state: DesignState) -> dict:
         return {}
     print(f"[Apply] Applying changes for: {state['current_usecase']}")
     errors = []
+    bdd_changes, ibd_changes, ad_changes = {}, {}, {}
     # requirement links (Analysis AD) must use the same SRS package(s) as ingest
     try:
         from read_all_requirements import set_srs_names
@@ -1657,6 +1756,9 @@ def apply_node(state: DesignState) -> dict:
                                              updated_ad, r,
                                              req_map=state.get("existing_req_map", {}))
                 print(f"[Apply] Analysis AD update: {ad_res}", file=sys.stderr)
+                ad_changes = diff_analysis_ad(state.get("existing_ad", ""), updated_ad,
+                                              state.get("context_req_map") or {},
+                                              state.get("existing_req_map") or {})
                 if ad_res.get("errors"):
                     errors.extend(ad_res["errors"])
             except Exception as e:
@@ -1677,11 +1779,15 @@ def apply_node(state: DesignState) -> dict:
                                        diagram_name=state.get("bdd_dd_name","DetailedDesignBDD"))
             print(f"[Apply] create_bdd_from_plan result: {res}", file=sys.stderr)
             errors.extend(res.get("errors") or ([res["error"]] if res.get("error") else []))
+            for k, v in (res.get("changes") or {}).items():
+                bdd_changes.setdefault(k, []).extend(v)
         if intf_plan["classes"] or intf_plan["realizations"]:
             res = create_bdd_from_plan(intf_plan, r,
                 diagram_name=state.get("bdd_intf_name","DetailedDesignInterfacesBDD"))
             print(f"[Apply] interfaces result: {res}", file=sys.stderr)
             errors.extend(res.get("errors") or ([res["error"]] if res.get("error") else []))
+            for k, v in (res.get("changes") or {}).items():
+                bdd_changes.setdefault(k, []).extend(v)
 
         # IBD delta (ports and/or links)
         ibd = state.get("ibd_delta", {}) or {}
@@ -1695,6 +1801,7 @@ def apply_node(state: DesignState) -> dict:
             }, r)
             print(f"[Apply] IBD result: {res}", file=sys.stderr)
             errors.extend(res.get("errors") or ([res["error"]] if res.get("error") else []))
+            ibd_changes = {k: res.get(k, []) for k in ("ports_created", "links_created", "contracts_added")}
 
     except Exception as e:
         import traceback
@@ -1711,7 +1818,9 @@ def apply_node(state: DesignState) -> dict:
                                 state.get("current_reqs") or [], had_errors=bool(errors))
     except Exception as e:
         print(f"[Apply] Could not record designed use case: {e}", file=sys.stderr)
-    return {"applied_usecases": [state["current_usecase"]], "errors": errors}
+    return {"applied_usecases": [state["current_usecase"]], "errors": errors,
+            "change_log": [{"usecase": state["current_usecase"], "analysis_ad": ad_changes,
+                            "bdd": bdd_changes, "ibd": ibd_changes}]}
 
 
 # ── Operation ADs: generated BEFORE the design review ─────────────────────────
@@ -1810,7 +1919,8 @@ def fan_out_ad_node(state: DesignState):
             errors.append(f"Operation AD {name}: {err}")
 
     return {"operation_ads": results, "errors": errors, "op_ads": {}, "op_ads_replace": [],
-            "op_ad_links": {}, "ad_only_ops": []}
+            "op_ad_links": {}, "ad_only_ops": [],
+            "change_log": [{"usecase": state["current_usecase"], "op_ads": results}]}
 
 
 def _with_flowchart_header(text: str) -> str:
@@ -2120,6 +2230,25 @@ def _run_graph(graph_input, config, write_output, component: str, label: str) ->
     Used for BOTH the initial run and every resume, so a resume that reaches the
     next human-review gate is reported as 'interrupted', not as 'completed'."""
     errors, new_ops, op_ads, approved, applied = [], [], [], None, []
+    changes: dict = {}
+
+    def _merge_change(entry):
+        uc = changes.setdefault(entry.get("usecase", "?"), {})
+        for k, v in entry.items():
+            if k != "usecase" and v:
+                uc[k] = v
+
+    def _summary_fields():
+        if not changes:
+            return {}
+        try:
+            path = write_change_summary_file(component, changes)
+        except Exception as e:
+            print(f"[Summary] could not write file: {e}", file=sys.stderr)
+            path = ""
+        return {"change_summary": changes,
+                "change_summary_md": render_change_summary(component, changes),
+                "change_summary_file": path}
 
     # Consume the WHOLE stream (never return/exit from inside it): the final
     # checkpoint is only guaranteed to be saved once the stream has finished,
@@ -2147,6 +2276,8 @@ def _run_graph(graph_input, config, write_output, component: str, label: str) ->
                 if "approved" in node_data:
                     approved = node_data["approved"]
                 applied += node_data.get("applied_usecases", []) or []
+                for entry in node_data.get("change_log", []) or []:
+                    _merge_change(entry)
 
     if interrupt_data is not None:
         try:
@@ -2161,17 +2292,31 @@ def _run_graph(graph_input, config, write_output, component: str, label: str) ->
             requirements_considered = _requirements_considered(state_vals),
             errors_so_far           = errors,
             applied_usecases        = applied,
+            **_summary_fields(),
             data                    = {k: v for k, v in interrupt_data.items()
                                        if k != "message"},
         )
         return
 
     try:
-        skipped = (graph.get_state(config).values or {}).get("skipped_usecases") or []
+        final_vals = graph.get_state(config).values or {}
     except Exception:
-        skipped = []
+        final_vals = {}
+    skipped = final_vals.get("skipped_usecases") or []
+    # end of run: the summary covers EVERY use case applied in this run, in order
+    run_log = final_vals.get("change_log") or []
+    if run_log:
+        changes.clear()
+        for entry in run_log:
+            _merge_change(entry)
+        for uc in changes:
+            if uc not in applied and ("bdd" in changes[uc] or "analysis_ad" in changes[uc]
+                                      or "ibd" in changes[uc]):
+                applied.append(uc)
+        applied.sort(key=lambda u: list(changes).index(u) if u in changes else 999)
     write_output(
         "completed",
+        **_summary_fields(),
         skipped_usecases = skipped,
         success        = len(errors) == 0,
         summary        = (f"Design applied for {component} (use cases: {', '.join(applied)})" if applied

@@ -274,9 +274,12 @@ def create_operation_ad(component_name: str, op_name: str, mermaid_str: str,
     except Exception as e:
         return fail(f"create_activity_diagram failed: {e}")
     errors += result.get("errors", []) or []
+    traces = 0
     if analysis_links:
-        errors += link_to_analysis(result.get("elements") or {}, analysis_links,
-                                   find_analysis_ad(dd_pkgs, usecase))
+        trace_errors = link_to_analysis(result.get("elements") or {}, analysis_links,
+                                        find_analysis_ad(dd_pkgs, usecase))
+        errors += trace_errors
+        traces = max(0, sum(len(v) for v in analysis_links.values()) - len(trace_errors))
         try: project.save()
         except Exception: pass
     print(f"[OpAD] Done: {ad_name}")
@@ -286,6 +289,7 @@ def create_operation_ad(component_name: str, op_name: str, mermaid_str: str,
         "operation": op_name,
         "module"   : module_name,
         "replaced" : bool(existing),
+        "traces"   : traces,
         "errors"   : errors,
     }
 
