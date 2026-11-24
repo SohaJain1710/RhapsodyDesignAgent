@@ -129,7 +129,48 @@ if (Test-Path $POSTINSTALL) {
 # Step 3: VS Code extension
 Write-Host ""
 Write-Host "[3/5] Installing VS Code extension..." -ForegroundColor Yellow
-$EXT = Join-Path $env:USERPROFILE ".vscode\extensions\oss.rhapsody-dd-Assist-0.0.2"
+# Folder name = extension identity from package.json (publisher.name-version)
+$PKG = Get-Content (Join-Path $ROOT "package.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+$EXT_ID = "$($PKG.publisher).$($PKG.name)"
+$EXT_ROOT = Join-Path $env:USERPROFILE ".vscode\extensions"
+$EXT = Join-Path $EXT_ROOT "$EXT_ID-$($PKG.version)"
+Write-Host "  Extension: $EXT_ID $($PKG.version)"
+
+# The VSIX build has the SAME identity. If it is installed, VS Code uses it and
+# silently ignores a copied folder - so this setup would appear to do nothing.
+$VSIX_DIRS = @(Get-ChildItem $EXT_ROOT -Directory -ErrorAction SilentlyContinue |
+               Where-Object { $_.Name -like "$EXT_ID-*" -and $_.FullName -ne $EXT -and
+                              $_.Name -match "-win32-|-linux-|-darwin-" })
+if ($VSIX_DIRS.Count -gt 0) {
+    Write-Host "  The VSIX version of the extension is installed: $($VSIX_DIRS[0].Name)" -ForegroundColor Yellow
+    Write-Host "  VS Code would keep using it and ignore this setup." -ForegroundColor Yellow
+    $CODE = Get-Command code -ErrorAction SilentlyContinue
+    $ans = Read-Host "  Uninstall the VSIX version now and use this repo checkout instead? (y/n)"
+    if ($ans -match "^[yY]") {
+        if ($CODE) {
+            & code --uninstall-extension $EXT_ID 2>&1 | Out-Host
+        }
+        foreach ($d in $VSIX_DIRS) { Remove-Item $d.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+        if (-not $CODE) {
+            Write-Host "  'code' command not found - if VS Code still lists the extension, uninstall it" -ForegroundColor DarkYellow
+            Write-Host "  in the Extensions view (Rhapsody Model Assistant -> Uninstall)." -ForegroundColor DarkYellow
+        }
+    } else {
+        Write-Host "  Keeping the VSIX version. Setup stopped (nothing changed)." -ForegroundColor Yellow
+        Write-Host "  Either keep using the VSIX, or uninstall it and run install.bat again."
+        Read-Host "Press Enter to exit"; exit 1
+    }
+}
+
+# Remove copies left by older versions of this setup (other folder names / versions)
+Get-ChildItem $EXT_ROOT -Directory -ErrorAction SilentlyContinue |
+    Where-Object { ($_.Name -like "oss.rhapsody-dd-Assist-*" -or $_.Name -like "$EXT_ID-*") -and
+                   $_.FullName -ne $EXT -and $_.Name -notmatch "-win32-|-linux-|-darwin-" } |
+    ForEach-Object {
+        Write-Host "  Removing old copy: $($_.Name)"
+        Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
 $EXTSRC = Join-Path $EXT "src"
 New-Item -ItemType Directory -Path $EXTSRC -Force | Out-Null
 
@@ -192,7 +233,7 @@ Write-Host ""
 Write-Host "Setup Complete!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host "  1. Open VS Code"
+Write-Host "  1. Open VS Code (restart it if it was open)"
 Write-Host "  2. Ctrl+Shift+P -> Developer: Reload Window"
 Write-Host "  3. Open Rhapsody with your project"
 Write-Host "  4. In VS Code chat: @rhapsody /design <ComponentName>"
