@@ -63,6 +63,9 @@ if (!fs.existsSync(RUNTIME_DIR)) { fs.mkdirSync(RUNTIME_DIR, { recursive: true }
 
 const UNIFIED_GRAPH = path.join(ROOT_DIR, 'tools', 'design_graph_unified.py');
 
+// Must match TOOLS_PROTOCOL in tools/config.py (bump both together)
+const TOOLS_PROTOCOL = 8;
+
 // ── LM Proxy ─────────────────────────────────────────────────────────────
 // The ONLY place model.sendRequest()-equivalent access happens now. Python's
 // ChatOpenAI client (base_url=http://localhost:3000/v1) calls this endpoint
@@ -352,6 +355,15 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
     }
 
     const output = JSON.parse(fs.readFileSync(outputFile, 'utf8'));
+    if (output.tools_protocol !== TOOLS_PROTOCOL) {
+        stream.markdown(
+            `\n> ⚠️ **Version mismatch:** this extension (\`${EXT_DIR}\`) expects tools version ` +
+            `${TOOLS_PROTOCOL}, but the Python tools in \`${output.tools_dir || path.join(ROOT_DIR, 'tools')}\` ` +
+            `report ${output.tools_protocol || 'an older version'}. Results may be wrong.\n>\n` +
+            `> Fix: install the newest VSIX with \`install.bat\` (and clear the setting ` +
+            `\`rhapsody.toolsRoot\` unless you run from a repo checkout), or in a developer ` +
+            `setup run \`git pull\` and then \`install.bat dev\`.\n`);
+    }
 
     if (output.status === 'interrupted') {
         const data = output.data || {};
@@ -1528,6 +1540,11 @@ async function setupPythonEnvironment() {
 function activate(context) {
     outputChannel = vscode.window.createOutputChannel('Rhapsody DD Generator');
     outputChannel.appendLine('[Rhapsody] Extension activating...');
+    outputChannel.appendLine(`[Rhapsody] Extension folder: ${EXT_DIR}`);
+    outputChannel.appendLine(`[Rhapsody] Python tools   : ${path.join(ROOT_DIR, 'tools')}` +
+        (setting('toolsRoot') ? '  (from setting rhapsody.toolsRoot)' : ''));
+    outputChannel.appendLine(`[Rhapsody] Python         : ${getPython() || '(not set up)'}`);
+    outputChannel.appendLine(`[Rhapsody] Runtime folder : ${RUNTIME_DIR} | tools protocol ${TOOLS_PROTOCOL}`);
 
     lmProxyServer = startLmProxy(outputChannel);
 

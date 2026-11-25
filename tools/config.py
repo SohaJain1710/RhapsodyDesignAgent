@@ -22,6 +22,11 @@ if os.path.exists(_CONFIG_FILE):
 
 # ── Public constants ──────────────────────────────────────────────────────────
 # RHAPSODY_RUNTIME_DIR is set by the VS Code extension (VSIX installs).
+# Interface version between the VS Code extension (src/extension.js,
+# TOOLS_PROTOCOL there) and these Python tools. Bump BOTH when the data they
+# exchange changes, so a stale extension/tools combination is reported.
+TOOLS_PROTOCOL = 8
+
 RUNTIME_DIR = (os.environ.get("RHAPSODY_RUNTIME_DIR")
                or _cfg.get("runtime_dir")
                or (r"C:\RhapsodyAIAgent_runtime" if os.name == "nt"

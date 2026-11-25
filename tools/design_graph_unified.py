@@ -2363,8 +2363,10 @@ if __name__ == "__main__":
     output_file = args.output
 
     def write_output(status, **kwargs):
+        from config import TOOLS_PROTOCOL
         with open(output_file, "w", encoding="utf-8") as f:
-            json.dump({"status": status, **kwargs}, f, indent=2)
+            json.dump({"status": status, "tools_protocol": TOOLS_PROTOCOL,
+                       "tools_dir": HERE, **kwargs}, f, indent=2)
 
     try:
         resume_val = None
