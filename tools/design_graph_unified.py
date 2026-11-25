@@ -83,6 +83,7 @@ class DesignState(TypedDict):
     op_ad_links      : dict        # {op: {design action id: [analysis action ids]}} from the LLM
     op_ad_feedback   : dict        # {op: reviewer feedback} → regenerate only these Operation ADs
     skipped_usecases : list        # already designed use cases the user chose not to redesign
+    srs_suggestions  : list        # closest SRS package names when none matched
     context_req_map  : dict        # requirement links of the Analysis AD BEFORE this run
     change_log       : Annotated[list, operator.add]   # what each apply really changed
     op_ads_replace   : list        # op names whose AD the reviewer edited (replace existing AD)
@@ -718,16 +719,22 @@ def ingest_node(state: DesignState) -> dict:
             requirements, srs_names = collect_all_requirements(project, component_name,
                                                                srs_names=srs_given or None)
             if not srs_names:
-                from read_all_requirements import list_srs_packages
+                from read_all_requirements import list_srs_packages, suggest_srs_packages
                 avail = list_srs_packages(project)
+                suggestions = suggest_srs_packages(project, srs_given or component_name)
                 what = (f"SRS package '{srs_given}'" if srs_given
                         else f"an SRS package matching {component_name}")
-                msg = (f"Could not find {what}. Available SRS packages: "
-                       f"{', '.join(avail) or '(none)'}. Start again with "
-                       f"/design {component_name} srs=<SRS package name>.")
+                msg = (f"Could not find {what}. "
+                       + (f"Closest SRS packages: {', '.join(suggestions)}. " if suggestions else "")
+                       + f"Start again with /design {component_name} srs=<SRS package name> "
+                       + f"({len(avail)} SRS packages exist - full list in the Output panel "
+                       + f"'Rhapsody DD Generator' and the debug log).")
                 print(f"[Ingest] ERROR: {msg}")
+                print("[Ingest] Available SRS packages:\n  " + "\n  ".join(avail))
                 log.step("ingest", msg)
-                return {"errors": [msg], "requirements": [], "use_cases": use_cases}
+                log.step("ingest", "Available SRS packages: " + ", ".join(avail))
+                return {"errors": [msg], "requirements": [], "use_cases": use_cases,
+                        "srs_suggestions": suggestions}
             if srs_names:
                 print(f"[Ingest] Rhapsody requirements: {len(requirements)} from {srs_names}")
                 log.step("ingest", f"Requirements read from: {', '.join(srs_names)}")
@@ -2230,6 +2237,7 @@ def _run_graph(graph_input, config, write_output, component: str, label: str) ->
     Used for BOTH the initial run and every resume, so a resume that reaches the
     next human-review gate is reported as 'interrupted', not as 'completed'."""
     errors, new_ops, op_ads, approved, applied = [], [], [], None, []
+    srs_suggestions = []
     changes: dict = {}
 
     def _merge_change(entry):
@@ -2276,6 +2284,7 @@ def _run_graph(graph_input, config, write_output, component: str, label: str) ->
                 if "approved" in node_data:
                     approved = node_data["approved"]
                 applied += node_data.get("applied_usecases", []) or []
+                srs_suggestions = node_data.get("srs_suggestions") or srs_suggestions
                 for entry in node_data.get("change_log", []) or []:
                     _merge_change(entry)
 
@@ -2316,6 +2325,7 @@ def _run_graph(graph_input, config, write_output, component: str, label: str) ->
         applied.sort(key=lambda u: list(changes).index(u) if u in changes else 999)
     write_output(
         "completed",
+        srs_suggestions = srs_suggestions,
         **_summary_fields(),
         skipped_usecases = skipped,
         success        = len(errors) == 0,

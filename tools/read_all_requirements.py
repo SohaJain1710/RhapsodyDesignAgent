@@ -229,6 +229,38 @@ def list_srs_packages(project) -> list:
     return names
 
 
+def _words(name: str) -> list:
+    """'rb_dcs_DataCollectorSystem' -> ['dcs', 'data', 'collector', 'system']."""
+    import re
+    parts = []
+    for chunk in re.split(r"[_\W]+", str(name)):
+        parts += re.findall(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+", chunk)
+    return [p.lower() for p in parts if p and p.lower() not in ("rb", "srs") and not p.isdigit()]
+
+
+def suggest_srs_packages(project, component_name, limit: int = 5) -> list:
+    """SRS package names most similar to the component name (best first)."""
+    comp = _words(component_name)
+    if not comp:
+        return []
+    abbrev = comp[0] if len(comp) > 1 else ""          # e.g. 'dcs' in rb_dcs_...
+    scored = []
+    for label in list_srs_packages(project):
+        name = label.split("::")[-1]
+        words = _words(name)
+        shared = set(comp) & set(words)
+        score = sum(len(w) for w in shared if len(w) > 2)
+        if abbrev and abbrev in words:
+            score += 10
+        # spelling similarity of the whole name (catches typos like "DataColector")
+        import difflib
+        score += 20 * difflib.SequenceMatcher(None, "".join(comp), "".join(words)).ratio()
+        if score > 12:
+            scored.append((score, -abs(len(words) - len(comp)), name))
+    scored.sort(reverse=True)
+    return [n for _, _, n in scored[:limit]]
+
+
 def find_srs_packages(project, component_name, srs_names=None):
     """ALL SRS sub-packages of a component, in EVERY top-level package that has
     an 'SRS' package (AB12Requirements, AB12Requirements_v2, CustRequirements, ...).

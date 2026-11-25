@@ -144,12 +144,19 @@ function runPython(scriptPath, args) {
 }
 
 // ── Intent parsing — /design and /design_bp only ────────────────────────
-// Optional SRS package name: srs=NAME | srs:NAME | --srs NAME | srs="NAME WITH SPACES"
-// (several names comma separated). Returns { srs, text without the option }.
+// Optional SRS package name, any of:
+//   srs=NAME  srs:NAME  srs NAME(SRS_...)  --srs NAME  --srs=NAME  srs_name=NAME  srsname=NAME
+//   "SRS name: NAME"  srs="NAME WITH SPACES"  — several names comma separated —
+//   or just the package name itself (SRS_<...> containing lowercase letters; requirement
+//   ids like SRS_SDM_217 are all caps/digits and are NOT taken as a package name).
+// Returns { srs, text without the option }.
 function extractSrs(text) {
-    const m = text.match(/(?:^|\s)(?:srs\s*[=:]\s*|--srs\s+|srs\s+(?=["']?SRS))(?:"([^"]+)"|([^\s"]+))/i);
-    if (!m) return { srs: '', text };
-    return { srs: (m[1] || m[2] || '').trim(), text: (text.slice(0, m.index) + ' ' + text.slice(m.index + m[0].length)).trim() };
+    const cut = m => (text.slice(0, m.index) + ' ' + text.slice(m.index + m[0].length)).trim();
+    let m = text.match(/(?:^|\s)(?:--)?srs(?:[\s_-]*name)?\s*(?:[=:]\s*|\s+(?=["']?SRS))(?:"([^"]+)"|'([^']+)'|([^\s"']+))/i);
+    if (m) return { srs: (m[1] || m[2] || m[3] || '').trim(), text: cut(m) };
+    m = text.match(/(?:^|\s)(SRS_\w*[a-z]\w*(?:\s*,\s*SRS_\w*[a-z]\w*)*)(?=\s|$)/);
+    if (m) return { srs: m[1].replace(/\s+/g, ''), text: cut(m) };
+    return { srs: '', text };
 }
 function srsQueryPart(srs) {
     return srs ? ` srs="${srs}"` : '';
@@ -533,7 +540,15 @@ async function runUnifiedGraph(component, requirementIds, requirementTexts, resu
         stream.markdown(`\nSkipped (already designed): ${output.skipped_usecases.join(', ')}`);
     }
     if (output.errors && output.errors.length) {
-        stream.markdown(`\n**Errors:**\n${output.errors.map(e => `- ${e}`).join('\n')}`);
+        stream.markdown(`\n**Errors:**\n${output.errors.filter(e => String(e).trim()).map(e => `- ${e}`).join('\n')}`);
+    }
+    // SRS package not found: one-click retry with the closest SRS packages
+    if (output.srs_suggestions && output.srs_suggestions.length) {
+        stream.markdown('\n**Use one of the closest SRS packages:**');
+        output.srs_suggestions.forEach(name => {
+            stream.button({ command: 'rhapsody.design.source', title: 'Use ' + name,
+                            arguments: [component, 'rhapsody', name] });
+        });
     }
 }
 
@@ -1403,7 +1418,8 @@ async function handleRhapsodyChat(request, context, stream, token) {
     if (intent.intent === 'design_source') {
         const label = intent.source === 'excel'
             ? `Excel: \`${intent.excelPath || 'unknown'}\``
-            : (intent.srs ? `Rhapsody SRS package \`${intent.srs}\`` : 'Rhapsody SRS');
+            : (intent.srs ? `Rhapsody SRS package \`${intent.srs}\``
+                          : 'Rhapsody SRS (package derived from the component name - add `srs=<SRS package>` if it differs)');
         stream.markdown(`Loading requirements from **${label}**...`);
         await runUnifiedGraph(
             intent.component, [],
