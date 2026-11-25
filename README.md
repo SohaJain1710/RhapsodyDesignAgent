@@ -6,7 +6,10 @@ A VS Code chat participant (`@rhapsody`) that generates Detailed Design artifact
 ## Install
 
 1. Download `rhapsody-design-assistant-win32-x64-<version>.vsix` from the repo's **Releases** page
-   (or, for an untagged build, from **Actions → Build VSIX → a run → Artifacts**).
+   (or, for an untagged build, from **Actions → Build VSIX → the newest run → Artifacts**).
+   Branch builds are versioned `0.0.<run number>`, so the newest build has the highest number;
+   the installed version is shown in the Extensions view and in the Output panel
+   "Rhapsody DD Generator".
 2. Put the `.vsix` next to `install.bat` (or in a `dist` folder) and run **`install.bat`** — it
    installs the newest VSIX into VS Code and removes folder copies from older setups.
    Alternatively: **Extensions** view → `…` menu → **Install from VSIX…**, or run:

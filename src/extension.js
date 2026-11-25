@@ -1540,6 +1540,9 @@ async function setupPythonEnvironment() {
 function activate(context) {
     outputChannel = vscode.window.createOutputChannel('Rhapsody DD Generator');
     outputChannel.appendLine('[Rhapsody] Extension activating...');
+    let extVersion = '?';
+    try { extVersion = context.extension.packageJSON.version; } catch {}
+    outputChannel.appendLine(`[Rhapsody] Extension version: ${extVersion}`);
     outputChannel.appendLine(`[Rhapsody] Extension folder: ${EXT_DIR}`);
     outputChannel.appendLine(`[Rhapsody] Python tools   : ${path.join(ROOT_DIR, 'tools')}` +
         (setting('toolsRoot') ? '  (from setting rhapsody.toolsRoot)' : ''));
